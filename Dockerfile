@@ -20,4 +20,4 @@ COPY . .
 EXPOSE 8501
 
 # Command to run your app
-ENTRYPOINT ["streamlit", "run", "main.py", "--server.address=0.0.0.0", "--server.port=8501"]
+CMD ["streamlit", "run", "main.py", "--server.address=0.0.0.0", "--server.port=8501"]

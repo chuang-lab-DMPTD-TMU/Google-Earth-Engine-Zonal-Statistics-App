@@ -31,10 +31,14 @@ if [[ -z "$APP_PORT" ]]; then
     exit 1
 fi
 
+# --- Write APP_PORT to .env so docker compose reliably picks it up ---
+grep -v "^APP_PORT=" .env > .env.tmp && mv .env.tmp .env
+echo "APP_PORT=${APP_PORT}" >> .env
+
 # --- Build and start ---
 echo "Starting GEE Batch Processor on port $APP_PORT..."
 docker compose build app
-docker compose up -d app
+docker compose up -d --force-recreate app
 
 # --- Wait for UI, then open browser ---
 for i in $(seq 1 30); do
