@@ -1,0 +1,27 @@
+# --- Credentials (NEVER commit these) ---
+config/gee-key.json
+*.json
+!package.json
+.env
+.env.*
+
+# --- Generated data (large, run-specific) ---
+data/uploads/
+data/runs/
+
+# --- Snakemake internals ---
+.snakemake/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.claude/

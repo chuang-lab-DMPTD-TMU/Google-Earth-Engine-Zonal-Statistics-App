@@ -1,0 +1,181 @@
+"""
+Snakemake workflow for GEE extraction using GeoJSON → GeoParquet pipeline.
+
+Workflow stages:
+1. Extract zonal stats from GEE as GeoJSON (preserves geometry)
+2. Convert GeoJSON chunks to GeoParquet using DuckDB
+3. Merge GeoParquet chunks into final product files
+
+Cloud-ready: GeoParquet is optimized for object storage (S3, GCS, Azure)
+"""
+import pandas as pd
+import os
+from pathlib import Path
+
+# Configuration
+PRODUCTS = config.get("products", {})
+SHP = config.get("shp_path", "")
+RUN_ID = config.get("run_id", "default")
+CHAIN_PARALLEL_WINDOW = int(config.get("chain_parallel_window", 3))
+
+
+# Directory structure
+GEOJSON_CHUNKS_DIR = f"data/runs/{RUN_ID}/intermediate/geojson"
+PARQUET_CHUNKS_DIR = f"data/runs/{RUN_ID}/intermediate/chunks"
+RESULTS_DIR        = f"data/runs/{RUN_ID}/results"
+LOGS_DIR           = f"data/runs/{RUN_ID}/logs"
+
+def infer_time_chunks(settings):
+    """Generate time chunks based on cadence.
+    Annual  → ['YYYY', ...]
+    Monthly → 3-month batches ['YYYY-MM_YYYY-MM', ...], remainder as its own chunk.
+    """
+    chunks = settings.get("time_chunks")
+    if chunks:
+        return chunks
+
+    cadence = settings.get("cadence", "monthly")
+    start = pd.to_datetime(settings["start_date"])
+    end   = pd.to_datetime(settings["end_date"])
+
+    if cadence == "annual":
+        return [str(year) for year in range(start.year, end.year + 1)]
+
+    months = [dt.strftime("%Y-%m") for dt in pd.date_range(start=start, end=end, freq="MS")]
+    result = []
+    for i in range(0, len(months), 3):
+        group = months[i:i + 3]
+        result.append(f"{group[0]}_{group[-1]}")
+    return result
+
+def get_final_targets():
+    """Define final output files: one GeoParquet per product"""
+    targets = []
+    for prod, settings in PRODUCTS.items():
+        start, end = settings["start_date"], settings["end_date"]
+        # Final merged GeoParquet file (all bands + geometry)
+        targets.append(f"{RESULTS_DIR}/{prod}/{prod}_{start}_to_{end}.parquet")
+    return targets
+
+def get_previous_chunk_output(wildcards):
+    """
+    Enforce sequential execution with sliding window to prevent 
+    overwhelming GEE API with parallel requests.
+    """
+    chunks = infer_time_chunks(PRODUCTS[wildcards.prod])
+    try:
+        idx = chunks.index(wildcards.time_chunk)
+    except ValueError:
+        return []
+
+    if idx < CHAIN_PARALLEL_WINDOW:
+        return []
+
+    prev_chunk = chunks[idx - CHAIN_PARALLEL_WINDOW]
+    # Return the parquet chunk (since GeoJSON is intermediate)
+    return f"{PARQUET_CHUNKS_DIR}/{wildcards.prod}/{wildcards.band}_{prev_chunk}.parquet"
+
+# ==============================================================================
+# Rules
+# ==============================================================================
+
+rule all:
+    input:
+        get_final_targets()
+
+rule extract_geojson_chunk:
+    """
+    Step 1: Extract zonal statistics from GEE as GeoJSON.
+    One job = One time chunk + One Product + One Band.
+    Preserves geometry for spatial analysis.
+    """
+    input:
+        shp = SHP,
+        prev = get_previous_chunk_output
+    output:
+        geojson = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.geojson"
+    resources:
+        gee=1  # Limit parallel GEE requests
+    threads: 1
+    wildcard_constraints:
+        # Band names are plain word identifiers — no date-like suffixes — so greedy
+        # matching cannot consume _YYYY-MM into {band} instead of {time_chunk}.
+        band       = r"[A-Za-z][A-Za-z0-9_]*",
+        # YYYY (annual) | YYYY-MM_YYYY-MM (3-month batch) | YYYY-MM (legacy single-month)
+        time_chunk = r"\d{4}(-\d{2}(_\d{4}-\d{2})?)?"
+    params:
+        stats = lambda wildcards: PRODUCTS[wildcards.prod]["statistics"],
+        ee_collection = lambda wildcards: PRODUCTS[wildcards.prod]["ee_collection"],
+        scale = lambda wildcards: PRODUCTS[wildcards.prod]["scale"],
+        cadence = lambda wildcards: PRODUCTS[wildcards.prod].get("cadence", "monthly"),
+        start_date = lambda wildcards: (
+            f"{wildcards.time_chunk}-01-01"                          # Annual: YYYY
+            if len(wildcards.time_chunk) == 4
+            else f"{wildcards.time_chunk.split('_')[0]}-01"          # Batch: YYYY-MM_YYYY-MM
+        ),
+        end_date = lambda wildcards: (
+            f"{wildcards.time_chunk}-12-31"                          # Annual: YYYY
+            if len(wildcards.time_chunk) == 4
+            else (
+                pd.to_datetime(wildcards.time_chunk.split("_")[-1]) + pd.offsets.MonthEnd(0)
+            ).strftime("%Y-%m-%d")                                   # Batch: last day of end month
+        )
+    log:
+        f"{LOGS_DIR}/{{prod}}/{{band}}_{{time_chunk}}_geojson.log"
+    script:
+        "scripts/worker_geojson.py"
+
+rule convert_to_parquet:
+    """
+    Step 2: Convert GeoJSON chunk to GeoParquet using DuckDB.
+    Applies compression and columnar storage optimization.
+    """
+    input:
+        geojson = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.geojson"
+    output:
+        parquet = f"{PARQUET_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.parquet"
+    threads: 1
+    wildcard_constraints:
+        band       = r"[A-Za-z][A-Za-z0-9_]*",
+        time_chunk = r"\d{4}(-\d{2}(_\d{4}-\d{2})?)?"
+    log:
+        f"{LOGS_DIR}/{{prod}}/{{band}}_{{time_chunk}}_parquet.log"
+    script:
+        "scripts/geojson_to_parquet.py"
+
+rule merge_product_parquet:
+    """
+    Step 3: Merge all GeoParquet chunks for a product into final output.
+    Combines all bands and time chunks with geometry preserved.
+    """
+    input:
+        chunks = lambda wildcards: [
+            f"{PARQUET_CHUNKS_DIR}/{wildcards.prod}/{band}_{chunk}.parquet"
+            for band in PRODUCTS[wildcards.prod]["bands"]
+            for chunk in infer_time_chunks(PRODUCTS[wildcards.prod])
+        ]
+    output:
+        merged = f"{RESULTS_DIR}/{{prod}}/{{prod}}_{{start}}_to_{{end}}.parquet"
+    params:
+        merge_strategy = "wide"  # or "long" for normalized form
+    threads: 2
+    log:
+        f"{LOGS_DIR}/{{prod}}/merge_{{start}}_to_{{end}}.log"
+    script:
+        "scripts/merge_parquet.py"
+
+# Optional: Cleanup intermediate GeoJSON files after conversion
+rule cleanup_geojson:
+    """
+    Optional cleanup step to remove intermediate GeoJSON files 
+    after successful conversion to GeoParquet.
+    """
+    input:
+        parquet = f"{PARQUET_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.parquet"
+    output:
+        marker = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/.cleanup_{{band}}_{{time_chunk}}"
+    shell:
+        """
+        rm -f {GEOJSON_CHUNKS_DIR}/{wildcards.prod}/{wildcards.band}_{wildcards.time_chunk}.geojson
+        touch {output.marker}
+        """

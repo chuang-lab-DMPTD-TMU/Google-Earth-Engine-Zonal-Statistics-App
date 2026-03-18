@@ -1,0 +1,62 @@
+# Generated from data/runs/inpactest1.yaml payload
+run_id: inpactest1
+shp_path: /app/data/uploads/5b13327d672c/ne_50m_admin_0_map_units_filtered.geoparquet
+output_dir: /app/data/results/inpactest1
+chain_parallel_window: 3
+products:
+  CHIRPS:
+    ee_collection: UCSB-CHG/CHIRPS/DAILY
+    bands:
+      - precipitation
+    statistics:
+      - sum
+    scale: 5566
+    start_date: '1986-01-01'
+    end_date: '2026-02-28'
+    cadence: monthly
+    time_chunks:
+      - 1986-01
+      - 1986-02
+      - 1986-03
+      - 1986-04
+      - 1986-05
+      - 1986-06
+      - 1986-07
+      - 1986-08
+      - 1986-09
+      - 1986-10
+      - 1986-11
+      - 1986-12
+  ERA5_LAND:
+    ee_collection: ECMWF/ERA5_LAND/DAILY_AGGR
+    bands:
+      - temperature_2m
+      - temperature_2m_min
+      - temperature_2m_max
+      - total_precipitation_sum
+      - total_evaporation_sum
+      - potential_evaporation_sum
+      - snow_evaporation_sum
+      - evaporation_from_bare_soil_sum
+      - evaporation_from_open_water_surfaces_excluding_oceans_sum
+      - evaporation_from_the_top_of_canopy_sum
+      - evaporation_from_vegetation_transpiration_sum
+    statistics:
+      - mean
+    scale: 9000
+    start_date: '1986-01-01'
+    end_date: '2026-02-28'
+    cadence: monthly
+    time_chunks:
+      - 1986-01
+      - 1986-02
+      - 1986-03
+      - 1986-04
+      - 1986-05
+      - 1986-06
+      - 1986-07
+      - 1986-08
+      - 1986-09
+      - 1986-10
+      - 1986-11
+      - 1986-12

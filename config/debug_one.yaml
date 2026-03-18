@@ -1,0 +1,12 @@
+shp_path: "/app/data/uploads/e26712ea/G97_64000_U0201_2015.shp"
+products:
+  CHIRPS:
+    ee_collection: "UCSB-CHG/CHIRPS/DAILY"
+    bands:
+      - precipitation
+    statistics:
+      - sum
+    scale: 5566
+    start_date: "2024-09-01"
+    end_date: "2024-09-30"
+output_dir: "/app/data/results"
