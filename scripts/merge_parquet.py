@@ -54,7 +54,7 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_fi
         
         # Read first chunk to get schema
         conn.execute(f"CREATE TABLE chunk_0 AS SELECT * FROM read_parquet('{chunk_files[0]}')")
-        first_cols = [col[0] for col in conn.execute("PRAGMA table_info(chunk_0)").fetchall()]
+        first_cols = [col[1] for col in conn.execute("PRAGMA table_info(chunk_0)").fetchall()]
         log_progress(f"First chunk columns: {', '.join(first_cols)}", log_file)
         
         # Load remaining chunks
@@ -74,7 +74,7 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_fi
             for idx in range(1, len(chunk_files)):
                 # Get columns from this chunk
                 chunk_cols = [
-                    col[0] for col in 
+                    col[1] for col in
                     conn.execute(f"PRAGMA table_info(chunk_{idx})").fetchall()
                 ]
                 
@@ -133,7 +133,7 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_fi
         
         # Sort by Date and region_id if available
         sort_cols = []
-        merged_cols = [col[0] for col in conn.execute("PRAGMA table_info(merged)").fetchall()]
+        merged_cols = [col[1] for col in conn.execute("PRAGMA table_info(merged)").fetchall()]
         if 'Date' in merged_cols:
             sort_cols.append('Date')
         if 'region_id' in merged_cols:

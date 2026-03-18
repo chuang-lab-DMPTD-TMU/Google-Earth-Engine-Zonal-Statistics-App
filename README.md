@@ -20,31 +20,26 @@ A small file (ending in `.json`) that gives the app access to Google Earth Engin
 
 1. Put the `gee_web_app` folder somewhere on your computer.
 
-2. Open a terminal inside that folder.
-   - **Mac:** right-click the folder in Finder → **New Terminal at Folder**
-   - **Windows:** open the folder, click the address bar, type `cmd`, press Enter
+2. Launch the app:
+   - **Mac:** double-click `Start.command`
+   - **Windows:** double-click `Start.bat`
+   - **Linux:** open a terminal in the folder and run `./quickstart.sh`
 
-3. Type the following and press Enter:
-   ```
-   ./quickstart.sh
-   ```
-   The first time you do this it will take a few minutes to set up. When it is ready you will see a message with a link, for example:
-   ```
-   Streamlit UI is ready at http://localhost:8501
-   ```
+   > **Mac — first launch only:** if you see "cannot be opened because the developer cannot be verified", right-click `Start.command`, choose **Open**, then click **Open**. You won't be asked again.
 
-4. Click that link (or paste it into your browser). The app opens.
+   The first time you launch it will take a few minutes to set up. You could take this time to read the USER_MANUAL.md, which has more detailed technical information about the app. When it is ready, your browser will open automatically.
+
+3. The app opens in your browser. While it is downloading, you can safely close the browser tab and the download will continue in the background.
 
 ---
 
 ## Stopping the app
 
-When you are done, go back to the terminal and type:
-```
-./stop.sh
-```
+- **Mac:** double-click `Stop.command`
+- **Windows:** double-click `Stop.bat`
+- **Linux:** run `./stop.sh` in a terminal
 
-Closing the browser tab does not stop the app — you need to run `stop.sh`.
+Closing the browser tab does not stop the app — you need to use the stop file.
 
 ---
 

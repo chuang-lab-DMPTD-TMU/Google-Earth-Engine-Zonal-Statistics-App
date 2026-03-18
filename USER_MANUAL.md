@@ -1,6 +1,6 @@
 # GEE Batch Processor — User Manual
 
-A practical guide from cloning the repository to querying your downloaded results.
+A practical guide from cloning the repository to downloading your results.
 
 ---
 
@@ -16,11 +16,9 @@ A practical guide from cloning the repository to querying your downloaded result
    - [Section 2 — Area of Interest](#section-2--area-of-interest)
    - [Section 3 — Results](#section-3--results)
    - [Section 4 — Partial Checkout](#section-4--partial-checkout)
-6. [Looking at past downloads with the Data Explorer](#6-looking-at-past-downloads-with-the-data-explorer)
-7. [Querying with DuckDB directly](#7-querying-with-duckdb-directly)
-8. [Stopping, resuming, and housekeeping](#8-stopping-resuming-and-housekeeping)
-9. [Troubleshooting](#9-troubleshooting)
-10. [For developers](#10-for-developers)
+6. [Stopping, resuming, and housekeeping](#6-stopping-resuming-and-housekeeping)
+7. [Troubleshooting](#7-troubleshooting)
+8. [For developers](#8-for-developers)
 
 ---
 
@@ -70,9 +68,12 @@ gee_web_app/
 ├── scripts/              ← Worker scripts called by Snakemake
 ├── config/               ← Key stored here after first-run setup (see §3)
 ├── data/                 ← Created automatically; holds all run data
+├── Start.command         ← Launcher for macOS (double-click)
+├── Start.bat             ← Launcher for Windows (double-click)
+├── Stop.command          ← Stop the app on macOS (double-click)
+├── Stop.bat              ← Stop the app on Windows (double-click)
 ├── docker-compose.yml
 ├── Dockerfile
-├── quickstart.sh
 └── requirements.txt
 ```
 
@@ -104,31 +105,25 @@ Open the **GEE credentials** expander in the left sidebar and click **Remove / r
 
 ## 4. Building and launching Docker
 
-Run the quickstart script from inside the project folder:
+**macOS** — double-click `Start.command` in Finder.
 
-```bash
-./quickstart.sh
-```
+**Windows** — double-click `Start.bat`.
 
-The script does three things:
+**Linux** — run `./quickstart.sh` from a terminal inside the project folder.
 
-1. Exports your host UID/GID so files created inside the container are owned by you.
-2. Runs `docker compose build app` — downloads the base image and installs Python dependencies. **This takes 3–10 minutes on the first run** and is cached for subsequent launches.
-3. Starts the container in detached mode, picks the first free port from 8501–8505, and polls it until the UI responds, then prints the URL (e.g. `Streamlit UI is ready at http://localhost:8501`).
+All three do the same thing:
 
-Open the printed URL in your browser.
+1. Check that Docker Desktop is running and show a clear message if it isn't.
+2. Build the image on first launch (downloads base image and installs dependencies — **takes 3–10 minutes the first time**, cached for every launch after).
+3. Start the container, pick the first free port from 8501–8505, wait for the UI to respond, then open it in your browser automatically.
+
+> **macOS — first launch only:** If you see "cannot be opened because the developer cannot be verified", right-click `Start.command` and choose **Open**, then click **Open** in the dialog. You won't be asked again.
 
 **To stop the app** when you are done:
 
-```bash
-./stop.sh
-```
-
-**To restart without rebuilding** (after the image already exists):
-
-```bash
-docker compose up -d app
-```
+- **macOS:** double-click `Stop.command`
+- **Windows:** double-click `Stop.bat`
+- **Linux:** run `./stop.sh` in a terminal
 
 **To follow live logs:**
 
@@ -179,7 +174,7 @@ Each dataset is collapsed inside its own expander. Expand one or more to configu
 1. Tick **Enable `<dataset>`**.
 2. **Select Bands** — choose which variables to extract (all are ticked by default).
 3. **Select Statistics (Reducers)** — `mean`, `sum`, `min`, `max`, `median`. The default is pre-filled per dataset.
-4. **Select date range** — monthly products show month dropdowns; annual products show year dropdowns.
+4. **Select date range** — Products with composite cadence will automatically extract data within the selected range.
 
 You can enable multiple datasets in one run; they are processed in parallel subject to GEE rate limits.
 
@@ -199,12 +194,12 @@ Click **Browse files** and upload one of:
 | **GeoJSON** | Single `.geojson` file |
 | **GeoParquet** | `.parquet` or `.geoparquet` with a geometry column |
 
-The app validates the geometry, hashes it (for deduplication), and stores it in `data/uploads/`. Geoparquet is converted automatically to GeoJSON for GEE compatility.
+The app validates the geometry and stores it inside the run directory at `data/runs/<run_id>/inputs/`, keeping all inputs and outputs together in one place.
 
 #### New run vs. resume
 
 - Leave **RUN ID** blank in Section 0 to start fresh.
-- Enter an existing RUN ID to re-use the same geometry and configuration (e.g. after a failure).
+- Enter an existing RUN ID to resume — the geometry is already stored with that run, so no re-upload is needed.
 
 #### Running the pipeline
 
@@ -212,7 +207,7 @@ Once at least one dataset is configured and the AOI is uploaded, the **Run Analy
 
 1. Freeze the run configuration.
 2. Auto-generate or reuse the RUN ID.
-3. Show an **Execution Plan** with job counts and a DAG diagram.
+3. Show an **Execution Plan** with job counts.
 4. Launch Snakemake in the background.
 
 Progress is shown below as chunk and final-file counts update. You can safely navigate away and come back — the pipeline runs in the background inside the container.
@@ -255,154 +250,7 @@ Re-click the button at any time to include newer completed chunks.
 
 ---
 
-## 6. Looking at past downloads with the Data Explorer
-
-Section **5. Data Explorer** (at the bottom of the page, below a divider) lets you browse, filter, and preview any GeoParquet result file without writing a line of code.
-
-### Step 1 — Find your file in the catalog
-
-The catalog table lists every `.parquet` file under `data/runs/`, with:
-
-| Column | Meaning |
-|--------|---------|
-| Run ID | The 6-character run identifier |
-| Product | Dataset name (CHIRPS, ERA5_LAND, etc.) |
-| File | Filename including date range |
-| Size MB | File size on disk |
-
-**Filter the catalog:**
-
-- **Filter by Run ID** — pick a specific run from the dropdown, or leave on "All".
-- **Search filename** — type any substring (e.g. `CHIRPS`, `2024`) to narrow the list.
-
-### Step 2 — Select a file
-
-Use the **Select a file to explore** dropdown. It shows `Run / Product / Filename` for easy identification.
-
-### Step 3 — Inspect metadata
-
-After selecting a file, three metric cards appear instantly:
-
-- **Rows** — total row count
-- **Columns** — number of columns
-- **Geometry columns** — number of geometry (WKB binary) columns
-
-Expand **Schema** to see every column name and its data type.
-
-### Step 4 — Filter without code
-
-| Control | What it does |
-|---------|-------------|
-| **Date from / Date to** | Text inputs pre-filled with the actual min/max date in the file. Edit to restrict the time window. |
-| **Show columns** (multi-select) | Pick which columns appear in the preview. Geometry columns are excluded automatically to keep the table readable. |
-| **Preview rows** (slider) | 10 – 2 000 rows shown in the table. |
-
-### Step 5 — Run and download
-
-Click **Run / Refresh** to execute the query and display the results table. A **Download result as CSV** button beneath the table lets you save exactly what you see (filtered, column-selected) to your machine.
-
-### Advanced: Custom SQL
-
-Expand **Custom SQL (advanced)** to see the DuckDB query the filter builder generated. You can edit it freely — `read_parquet('/path/to/file.parquet')` is the table reference. Tick **Use custom SQL instead of filter above** and click **Run / Refresh**.
-
-Example queries:
-
-```sql
--- Monthly mean precipitation for region 42
-SELECT "Date", "region_id", "precipitation_sum"
-FROM read_parquet('/app/data/runs/ABC123/results/CHIRPS/CHIRPS_2020-01-01_to_2024-12-31.parquet')
-WHERE "region_id" = 42
-ORDER BY "Date"
-
--- Hottest months (mean day LST > 305 K)
-SELECT "Date", AVG("LST_Day_1km_mean") AS avg_lst
-FROM read_parquet('/app/data/runs/XYZ/results/MODIS_LST/MODIS_LST_2000-02-18_to_2026-02-10.parquet')
-GROUP BY "Date"
-HAVING avg_lst > 305
-ORDER BY avg_lst DESC
-LIMIT 20
-```
-
----
-
-## 7. Querying with DuckDB directly
-
-For power users who prefer a terminal or Python script over the UI.
-
-### From a terminal inside the container
-
-```bash
-docker compose exec app bash
-
-# Open DuckDB CLI
-duckdb
-
-# Then inside DuckDB:
-LOAD spatial;
-SELECT * FROM read_parquet('/app/data/runs/<run_id>/results/<product>/*.parquet') LIMIT 5;
-```
-
-### From Python (outside the container)
-
-```python
-import duckdb
-
-conn = duckdb.connect()  # in-memory
-
-# Query a result file directly
-df = conn.execute("""
-    SELECT *
-    FROM read_parquet('data/runs/<run_id>/results/<product>/<file>.parquet')
-    LIMIT 1000
-""").df()
-
-print(df.head())
-```
-
-### Querying the run registry database
-
-All run metadata is stored in `data/runs/run_state.duckdb`.
-
-```python
-import duckdb
-
-conn = duckdb.connect("data/runs/run_state.duckdb", read_only=True)
-
-# List all runs and their status
-conn.execute("SELECT run_id, status, attempts, updated_at FROM run_status ORDER BY updated_at DESC").df()
-
-# Full event history for one run
-conn.execute("""
-    SELECT event_time, event_type, status, message
-    FROM run_events
-    WHERE run_id = 'ABC123'
-    ORDER BY event_time
-""").df()
-```
-
-### Useful DuckDB patterns for GeoParquet
-
-```sql
--- Describe the schema of a file
-DESCRIBE SELECT * FROM read_parquet('path/to/file.parquet') LIMIT 0;
-
--- Count rows and date range
-SELECT COUNT(*), MIN("Date"), MAX("Date")
-FROM read_parquet('path/to/file.parquet');
-
--- Query multiple runs at once with a glob
-SELECT *, filename
-FROM read_parquet('data/runs/*/results/CHIRPS/*.parquet', filename=true);
-
--- Export a filtered subset back to parquet
-COPY (
-    SELECT * FROM read_parquet('input.parquet') WHERE "Date" >= '2020-01-01'
-) TO 'output_filtered.parquet' (FORMAT PARQUET, COMPRESSION ZSTD);
-```
-
----
-
-## 8. Stopping, resuming, and housekeeping
+## 6. Stopping, resuming, and housekeeping
 
 ### Stopping a running pipeline
 
@@ -413,25 +261,20 @@ COPY (
 ### Resuming a failed or stopped run
 
 1. Enter the RUN ID in the Section 0 sidebar input.
-2. Re-upload the same AOI file (or the app will use the cached copy if the hash matches).
-3. Configure the same products and date range.
-4. Click **Run Analysis** — Snakemake picks up from where it left off (only missing chunks are re-extracted).
+2. Configure the same products and date range.
+3. Click **Run Analysis** — the stored geometry is reused automatically and Snakemake picks up from where it left off (only missing chunks are re-extracted).
 
 ### Unlocking a stale Snakemake lock
 
-If the app crashed mid-run, Snakemake may leave a `.snakemake/locks/` directory. The app automatically attempts an unlock before each new run. If problems persist:
+If the app crashed mid-run, Snakemake may leave a `.snakemake/locks/` directory inside the run folder. The app automatically attempts an unlock before each new run. If problems persist, run the unlock command for the specific run:
 
 ```bash
-docker compose exec app snakemake --unlock --snakefile Snakefile_parquet --directory /app
+docker compose exec app bash -c "cd /app/data/runs/<run_id> && snakemake --unlock --snakefile /app/Snakefile_parquet --directory /app/data/runs/<run_id>"
 ```
-
-### Deleting a run's data
-
-In the sidebar, expand **Local RUN registry** → select the run → click **Delete this saved run**. This removes the YAML registry entry, result files, intermediate chunks, and logs for that RUN ID.
 
 ---
 
-## 9. Troubleshooting
+## 7. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
@@ -439,8 +282,6 @@ In the sidebar, expand **Local RUN registry** → select the run → click **Del
 | "GEE authentication error" | `gee-key.json` missing or wrong path | Confirm file is at `config/gee-key.json` |
 | Pipeline hangs at 0 chunks | GEE rate limit or network issue | Wait 2 min; check `data/runs/<run_id>/logs/snakemake_run.log` |
 | Run shows `failed` immediately | Snakemake lock from a prior crash | Run the unlock command above, then retry |
-| Data Explorer shows no files | No completed runs yet, or wrong Results RUN ID | Check `data/runs/` directory |
-| "Could not read parquet file" in Explorer | Partial/corrupt file from an incomplete run | Use Partial Checkout (§4) for in-progress runs |
 | File ownership issues on Linux | UID/GID mismatch | `./quickstart.sh` fixes this automatically by exporting `HOST_UID`/`HOST_GID` |
 
 **Log locations:**
@@ -453,20 +294,19 @@ In the sidebar, expand **Local RUN registry** → select the run → click **Del
 
 ---
 
-## 10. For developers
+## 8. For developers
 
 ### Directory layout
 
 ```
 gee_web_app/
 ├── data/              # runtime data (not committed to git)
-│   ├── uploads/       # AOI geometry files, deduplicated by content hash
 │   └── runs/          # all per-run output
 │       ├── <run_id>/
-│       │   ├── results/      # final merged .parquet / .csv files
-│       │   ├── logs/         # snakemake_run.log
-│       │   ├── intermediate/ # chunk working files
-│       │   └── run.yaml      # frozen run configuration
+│       │   ├── inputs/       # uploaded geometry file (shapefile, GeoJSON, or GeoParquet)
+│       │   ├── results/      # final merged .parquet files
+│       │   ├── logs/         # snakemake_run.log and per-job logs
+│       │   └── intermediate/ # chunk working files (GeoJSON → GeoParquet)
 │       └── run_state.duckdb  # run status and event history
 ├── config/            # GEE service account key (not committed to git)
 │   └── gee-key.json
@@ -505,9 +345,4 @@ export HOST_UID=$(id -u) HOST_GID=$(id -g)
 docker compose up -d app
 ```
 
-### Inspecting the Snakemake DAG
 
-```bash
-docker compose exec app bash
-snakemake --dag --snakefile Snakefile_parquet --directory /app | dot -Tsvg > dag.svg
-```

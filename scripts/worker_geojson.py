@@ -98,38 +98,104 @@ def log_progress(message):
         f.write(f"[{datetime.now().isoformat()}] {message}\n")
         f.flush()
 
-def export_to_geojson(image, regions, scale, out_geojson, max_retries=5):
+def build_reducer(stat_name):
+    """Return the EE reducer for a given stat name."""
+    return {
+        "SUM":    ee.Reducer.sum(),
+        "MEAN":   ee.Reducer.mean(),
+        "MAX":    ee.Reducer.max(),
+        "MIN":    ee.Reducer.min(),
+        "MEDIAN": ee.Reducer.median(),
+    }.get(stat_name.upper(), ee.Reducer.mean())
+
+
+def build_compound_reducer(stats_list):
+    """
+    Build a compound reducer for all configured stats.
+    For a single stat returns that reducer directly.
+    For multiple stats combines them with sharedInputs=True so all receive
+    the same input band and each outputs a separate '{band}_{stat}' property.
+    """
+    if len(stats_list) == 1:
+        return build_reducer(stats_list[0])
+    base = build_reducer(stats_list[0])
+    for s in stats_list[1:]:
+        base = base.combine(build_reducer(s), sharedInputs=True)
+    return base
+
+
+def build_daily_stats(collection, regions, scale, spatial_reducer):
+    """Map reduceRegions over each image in the collection, tagging each feature with its Date."""
+    def reduce_image(img):
+        date_str = img.date().format("YYYY-MM-dd")
+        return img.reduceRegions(
+            collection=regions,
+            reducer=spatial_reducer,
+            scale=scale,
+            crs='EPSG:4326'
+        ).map(lambda f: f.set("Date", date_str))
+    return collection.map(reduce_image).flatten()
+
+
+def export_to_geojson(image, regions, scale, out_geojson, max_retries=5, prop_rename=None,
+                      precomputed_stats=None):
     """
     Export zonal statistics as GeoJSON with geometry.
     Uses reduceRegions for proper zonal stats computation.
+    Pass precomputed_stats to skip the internal reduceRegions call (e.g. for daily per-image mode).
     """
     log_progress(f"Exporting to GeoJSON: {out_geojson}")
-    
-    # Compute zonal statistics using reduceRegions
-    stats = image.reduceRegions(
-        collection=regions,
-        reducer=ee.Reducer.mean(),  # Already reduced, so use mean
-        scale=scale,
-        crs='EPSG:4326'
-    )
+
+    if precomputed_stats is not None:
+        stats = precomputed_stats
+    else:
+        # Compute zonal statistics using reduceRegions
+        stats = image.reduceRegions(
+            collection=regions,
+            reducer=ee.Reducer.mean(),  # Already temporally reduced, so use mean spatially
+            scale=scale,
+            crs='EPSG:4326'
+        )
     
     # Export to GeoJSON with retries
     for attempt in range(max_retries):
         try:
-            # Convert to GeoJSON dict
-            geojson_dict = stats.getInfo()
-            
+            # Paginate getInfo() to handle collections with >5000 features
+            PAGE_SIZE = 5000
+            total = stats.size().getInfo()
+            log_progress(f"Collection has {total} features, fetching in pages of {PAGE_SIZE}")
+            features = []
+            for offset in range(0, total, PAGE_SIZE):
+                page = stats.toList(PAGE_SIZE, offset).getInfo()
+                features.extend(page)
+
+            # Rename reducer output properties to expected {band}_{stat} convention.
+            # GEE reduceRegions names output properties after the reducer (e.g. 'mean'),
+            # not the band name, so we rename here before writing.
+            if prop_rename:
+                for feature in features:
+                    props = feature.get("properties", {})
+                    for old_key, new_key in prop_rename.items():
+                        if old_key in props:
+                            props[new_key] = props.pop(old_key)
+
+            geojson_dict = {"type": "FeatureCollection", "features": features}
+
             # Write to file
             os.makedirs(os.path.dirname(out_geojson), exist_ok=True)
             with open(out_geojson, 'w') as f:
                 json.dump(geojson_dict, f)
-            
-            log_progress(f"✓ GeoJSON export successful: {len(geojson_dict.get('features', []))} features")
+
+            log_progress(f"✓ GeoJSON export successful: {len(features)} features")
             return True
-            
+
         except Exception as e:
             error_msg = str(e)
-            if "Request payload size exceeds" in error_msg or "Computation timed out" in error_msg:
+            if (
+                "Request payload size exceeds" in error_msg
+                or "Computation timed out" in error_msg
+                or "Collection query aborted" in error_msg
+            ):
                 if attempt < max_retries - 1:
                     log_progress(f"✗ Export failed (attempt {attempt+1}/{max_retries}): {error_msg}")
                     # On retry, we'll need to simplify geometry
@@ -148,35 +214,31 @@ try:
     log_progress("Earth Engine initialized")
 
     # Access snakemake parameters
-    col_id = snakemake.params.ee_collection
-    scale  = snakemake.params.scale
-    stats_list = snakemake.params.stats  # List of statistics to compute
-    stat   = stats_list[0]  # Use first stat for now (can be extended)
-    start  = snakemake.params.start_date
-    end    = snakemake.params.end_date
-    band   = snakemake.wildcards.band
-    shp    = snakemake.input.shp
-    out    = snakemake.output.geojson
-    
-    log_progress(f"Parameters: collection={col_id}, band={band}, stat={stat}, dates={start} to {end}")
+    col_id     = snakemake.params.ee_collection
+    scale      = snakemake.params.scale
+    stats_list = snakemake.params.stats
+    start      = snakemake.params.start_date
+    end        = snakemake.params.end_date
+    cadence    = snakemake.params.cadence
+    band       = snakemake.wildcards.band
+    shp        = snakemake.input.shp
+    out        = snakemake.output.geojson
 
-    # Ensure output directory exists
+    log_progress(f"Parameters: collection={col_id}, band={band}, stats={stats_list}, cadence={cadence}, dates={start} to {end}")
+
     os.makedirs(os.path.dirname(out), exist_ok=True)
 
-    # Load regions and get original GeoDataFrame
     log_progress("Building regions from shapefile")
     regions, gdf_original = build_regions(shp)
     log_progress(f"Regions built: {len(gdf_original)} features")
-    
-    # Filter collection (add 1 day to end for exclusive range)
+
     end_dt = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-    
     log_progress("Filtering image collection")
     collection = ee.ImageCollection(col_id).filterDate(start, end_dt).select([band])
-    
+
     collection_count = collection.size().getInfo()
     log_progress(f"Collection has {collection_count} images")
-    
+
     if collection_count == 0:
         log_progress(
             f"WARNING: No images found for {col_id}/{band} between {start} and {end}. "
@@ -184,71 +246,76 @@ try:
         )
         empty_features = []
         for idx, row in gdf_original.iterrows():
-            feature = {
+            props = {"region_id": row.get('region_id', str(idx)), "Date": start}
+            for s in stats_list:
+                props[f"{band}_{s.lower()}"] = None
+            empty_features.append({
                 "type": "Feature",
                 "geometry": json.loads(gpd.GeoSeries([row.geometry]).to_json())['features'][0]['geometry'],
-                "properties": {
-                    "region_id": row.get('region_id', str(idx)),
-                    "Date": start,
-                    f"{band}_{stat}": None
-                }
-            }
-            empty_features.append(feature)
-        
-        empty_geojson = {
-            "type": "FeatureCollection",
-            "features": empty_features
-        }
+                "properties": props
+            })
         with open(out, 'w') as f:
-            json.dump(empty_geojson, f)
+            json.dump({"type": "FeatureCollection", "features": empty_features}, f)
         log_progress(f"Wrote empty GeoJSON to {out}")
         sys.exit(0)
-    
-    # Reduce collection based on statistic
-    log_progress(f"Reducing collection using {stat.upper()}")
-    if stat.upper() == "SUM":
-        image = collection.reduce(ee.Reducer.sum())
-    elif stat.upper() == "MEAN":
-        image = collection.reduce(ee.Reducer.mean())
-    elif stat.upper() == "MAX":
-        image = collection.reduce(ee.Reducer.max())
-    elif stat.upper() == "MIN":
-        image = collection.reduce(ee.Reducer.min())
-    elif stat.upper() == "MEDIAN":
-        image = collection.reduce(ee.Reducer.median())
+
+    # GEE property naming:
+    # - Single stat + single-output reducer → property named after reducer (e.g. 'mean'), not band.
+    #   Use prop_rename to correct this.
+    # - Multiple stats via compound reducer → GEE outputs '{band}_{stat}' correctly.
+    #   No rename needed.
+    if len(stats_list) == 1:
+        s = stats_list[0]
+        prop_rename = {s.lower(): f"{band}_{s.lower()}"}
     else:
-        image = collection.reduce(ee.Reducer.mean())
-    
-    # Rename band to include statistic
-    band_names = image.bandNames().getInfo()
-    if band_names:
-        image = image.rename([f"{band}_{stat}"])
-    
-    # Export to GeoJSON
-    log_progress("Starting zonal statistics export to GeoJSON")
-    success = export_to_geojson(image, regions, scale, out, max_retries=3)
-    
-    # If export failed due to complexity, retry with simplified geometry
+        prop_rename = {}
+
+    def _do_export(regions_fc, max_retries):
+        if cadence in ("daily", "composite"):
+            compound = build_compound_reducer(stats_list)
+            stats_fc = build_daily_stats(collection, regions_fc, scale, compound)
+            return export_to_geojson(
+                image=None, regions=regions_fc, scale=scale, out_geojson=out,
+                max_retries=max_retries, prop_rename=prop_rename, precomputed_stats=stats_fc
+            )
+        else:
+            # Build one temporally-reduced image per stat, rename each band, combine.
+            # Spatial mean over pixels within each region is applied inside export_to_geojson.
+            stat_images = []
+            for s in stats_list:
+                img = collection.reduce(build_reducer(s))
+                if img.bandNames().getInfo():
+                    img = img.rename([f"{band}_{s.lower()}"])
+                stat_images.append(img)
+            combined = stat_images[0]
+            for img in stat_images[1:]:
+                combined = combined.addBands(img)
+            return export_to_geojson(
+                combined, regions_fc, scale, out,
+                max_retries=max_retries, prop_rename=prop_rename
+            )
+
+    log_progress(f"Extracting {len(stats_list)} stat(s): {stats_list}")
+    success = _do_export(regions, max_retries=3)
+
     if not success:
-        simplify_tolerances = [0.001, 0.005, 0.01, 0.02]
-        for tolerance in simplify_tolerances:
+        for tolerance in [0.001, 0.005, 0.01, 0.02]:
             log_progress(f"Retrying with simplified geometry (tolerance={tolerance})")
             regions_simplified, _ = build_regions(shp, simplify_tolerance=tolerance)
-            success = export_to_geojson(image, regions_simplified, scale, out, max_retries=1)
+            success = _do_export(regions_simplified, max_retries=1)
             if success:
                 break
-        
-        if not success:
-            raise RuntimeError(
-                "Failed to export GeoJSON even with geometry simplification. "
-                "The AOI may be too complex. Consider uploading a simpler shapefile."
-            )
-    
-    # Verify output file was created
+
+    if not success:
+        raise RuntimeError(
+            "Failed to export GeoJSON even with geometry simplification. "
+            "The AOI may be too complex. Consider uploading a simpler shapefile."
+        )
+
     if not os.path.exists(out):
         raise RuntimeError(f"GeoJSON export completed but file not found: {out}")
-    
-    file_size = os.path.getsize(out) / (1024*1024)  # MB
+
+    file_size = os.path.getsize(out) / (1024*1024)
     log_progress(f"SUCCESS: GeoJSON written to {out} ({file_size:.2f} MB)")
 
 except Exception as e:

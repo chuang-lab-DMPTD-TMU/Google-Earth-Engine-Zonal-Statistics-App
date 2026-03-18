@@ -16,14 +16,16 @@ from pathlib import Path
 PRODUCTS = config.get("products", {})
 SHP = config.get("shp_path", "")
 RUN_ID = config.get("run_id", "default")
+APP_DIR = config.get("app_dir", "/app")
 CHAIN_PARALLEL_WINDOW = int(config.get("chain_parallel_window", 3))
 
 
-# Directory structure
-GEOJSON_CHUNKS_DIR = f"data/runs/{RUN_ID}/intermediate/geojson"
-PARQUET_CHUNKS_DIR = f"data/runs/{RUN_ID}/intermediate/chunks"
-RESULTS_DIR        = f"data/runs/{RUN_ID}/results"
-LOGS_DIR           = f"data/runs/{RUN_ID}/logs"
+# Directory structure — absolute paths so the Snakefile works correctly
+# regardless of which per-run directory Snakemake uses as its working directory.
+GEOJSON_CHUNKS_DIR = f"{APP_DIR}/data/runs/{RUN_ID}/intermediate/geojson"
+PARQUET_CHUNKS_DIR = f"{APP_DIR}/data/runs/{RUN_ID}/intermediate/chunks"
+RESULTS_DIR        = f"{APP_DIR}/data/runs/{RUN_ID}/results"
+LOGS_DIR           = f"{APP_DIR}/data/runs/{RUN_ID}/logs"
 
 def infer_time_chunks(settings):
     """Generate time chunks based on cadence.
@@ -40,6 +42,19 @@ def infer_time_chunks(settings):
 
     if cadence == "annual":
         return [str(year) for year in range(start.year, end.year + 1)]
+
+    if cadence == "daily":
+        # One chunk per month: ~30 images × N regions keeps batch sizes manageable.
+        return [dt.strftime("%Y-%m") for dt in pd.date_range(start=start, end=end, freq="MS")]
+
+    if cadence == "composite":
+        # 3-month batches are fine: ~12 images (8-day) or ~6 images (16-day) per chunk.
+        months = [dt.strftime("%Y-%m") for dt in pd.date_range(start=start, end=end, freq="MS")]
+        result = []
+        for i in range(0, len(months), 3):
+            group = months[i:i + 3]
+            result.append(f"{group[0]}_{group[-1]}")
+        return result
 
     months = [dt.strftime("%Y-%m") for dt in pd.date_range(start=start, end=end, freq="MS")]
     result = []

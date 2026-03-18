@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 import zipfile
 import shutil
+import tempfile
 import geopandas as gpd
 import pyarrow.parquet as pq
 
@@ -54,7 +55,6 @@ if 'partial_merge_run_id' not in st.session_state:
 # Auto-detect Docker (/app/data) vs local (./data) environment
 _docker_data = Path("/app/data")
 BASE_DATA_DIR = _docker_data if _docker_data.exists() else Path(__file__).parent / "data"
-UPLOAD_DIR = BASE_DATA_DIR / "uploads"
 RUNS_DIR  = BASE_DATA_DIR / "runs"
 CONFIG_DIR = Path("/tmp/gee_configs")
 ACTIVE_SNAKEFILE = "Snakefile_parquet"
@@ -74,7 +74,7 @@ def logs_dir(run_id: str) -> Path:
 def intermediate_dir(run_id: str) -> Path:
     return RUNS_DIR / run_id / "intermediate"
 
-for folder in [UPLOAD_DIR, RUNS_DIR, CONFIG_DIR]:
+for folder in [RUNS_DIR, CONFIG_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 # --- GEE Key helpers ---
@@ -113,9 +113,24 @@ def read_gee_key_email() -> str | None:
     except Exception:
         return None
 
+def _duckdb_connect(path: str, retries: int = 8, delay: float = 0.25):
+    """Open a DuckDB write connection with retry on lock contention."""
+    import time as _time
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(path)
+        except duckdb.IOException as e:
+            if "lock" not in str(e).lower():
+                raise
+            last_exc = e
+            _time.sleep(delay * (attempt + 1))
+    raise last_exc
+
+
 def ensure_run_db():
     """Initialize DuckDB tables used for run status and event logs."""
-    with duckdb.connect(str(RUN_DB_PATH)) as conn:
+    with _duckdb_connect(str(RUN_DB_PATH)) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS run_status (
@@ -166,7 +181,7 @@ def ensure_run_db():
 def upsert_run_status_sql(run_id: str, record: dict):
     """Mirror run registry state to DuckDB for SQL-based dashboards/queries."""
     ensure_run_db()
-    with duckdb.connect(str(RUN_DB_PATH)) as conn:
+    with _duckdb_connect(str(RUN_DB_PATH)) as conn:
         conn.execute(
             """
             INSERT INTO run_status (
@@ -206,7 +221,7 @@ def append_run_event_sql(run_id: str, event_type: str, status: str, message: str
     """Append run events to DuckDB for SQL history queries."""
     ensure_run_db()
     payload_json = json.dumps(payload or {}, default=str)
-    with duckdb.connect(str(RUN_DB_PATH)) as conn:
+    with _duckdb_connect(str(RUN_DB_PATH)) as conn:
         conn.execute(
             """
             INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json)
@@ -240,7 +255,7 @@ def get_run_progress_sql(run_id: str, payload: dict):
     chunk_glob = str((intermediate_dir(run_id) / "chunks" / "**" / "*.parquet").as_posix())
     final_glob = str((results_dir(run_id) / "*" / "*.parquet").as_posix())
 
-    with duckdb.connect(str(RUN_DB_PATH)) as conn:
+    with duckdb.connect(":memory:") as conn:
         done_chunks = conn.execute("SELECT COUNT(*) FROM glob(?)", [chunk_glob]).fetchone()[0]
         done_final = conn.execute("SELECT COUNT(*) FROM glob(?)", [final_glob]).fetchone()[0]
 
@@ -270,7 +285,7 @@ def initialise_jobs(run_id: str, payload: dict):
     if not rows:
         return
     ensure_run_db()
-    with duckdb.connect(str(RUN_DB_PATH)) as conn:
+    with _duckdb_connect(str(RUN_DB_PATH)) as conn:
         conn.executemany(
             """
             INSERT INTO jobs (run_id, product, band, time_chunk, status)
@@ -293,7 +308,7 @@ def get_job_progress(run_id: str) -> dict:
     """
     ensure_run_db()
     try:
-        with duckdb.connect(str(RUN_DB_PATH)) as conn:
+        with _duckdb_connect(str(RUN_DB_PATH)) as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) FROM jobs WHERE run_id = ? GROUP BY status",
                 [run_id],
@@ -556,6 +571,16 @@ def reconcile_run_status(run_id: str, run_meta):
             status="failed",
             error_message="Run interrupted or app session ended before status finalization."
         )
+        try:
+            subprocess.run(
+                ["snakemake", "--unlock",
+                 "--snakefile", str(Path(__file__).parent / ACTIVE_SNAKEFILE),
+                 "--directory", str(run_dir(run_id))],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(run_dir(run_id)),
+            )
+        except Exception:
+            pass
         return load_run_registry(run_id)
 
     return run_meta
@@ -710,11 +735,17 @@ def get_year_list(start_str, end_str):
 
 def get_time_chunks(start_str, end_str, cadence="monthly"):
     """Returns time chunks based on cadence.
-    Annual → ['YYYY', ...].
-    Monthly → 3-month batches ['YYYY-MM_YYYY-MM', ...] with remainder chunk.
+    Annual    → ['YYYY', ...].
+    Monthly   → 3-month batches ['YYYY-MM_YYYY-MM', ...] with remainder chunk.
+    Daily     → individual months ['YYYY-MM', ...] (per-image extraction, one month at a time).
+    Composite → individual months ['YYYY-MM', ...] (per-composite extraction, one month at a time).
     """
     if cadence == "annual":
         return get_year_list(start_str, end_str)
+    elif cadence == "daily":
+        return get_month_list(start_str, end_str)
+    elif cadence == "composite":
+        return get_quarterly_chunks(start_str, end_str)
     else:
         return get_quarterly_chunks(start_str, end_str)
 
@@ -726,7 +757,7 @@ PRODUCT_REGISTRY = {
         "max_date": datetime(2026, 2, 28),
         "native_resolution": "Daily",
         "scale": 5566,
-        "cadence": "monthly",
+        "cadence": "daily",
         "content": {
             "precipitation": {"stats": ["sum", "mean", "max"], "default_stats": ["sum"]}
         },
@@ -738,7 +769,7 @@ PRODUCT_REGISTRY = {
         "max_date": datetime(2026, 2, 28),
         "native_resolution": "Daily",
         "scale": 9000,
-        "cadence": "monthly",
+        "cadence": "daily",
         "content": {
             "temperature_2m": {"stats": ["mean", "min", "max"], "default_stats": ["mean"]},
             "temperature_2m_min": {"stats": ["mean", "min", "max"], "default_stats": ["mean"]},
@@ -760,7 +791,7 @@ PRODUCT_REGISTRY = {
         "max_date": datetime(2026, 2, 10),
         "native_resolution": "8-day composite",
         "scale": 1000,
-        "cadence": "monthly",
+        "cadence": "composite",
         "content": {
             "LST_Day_1km": {"stats": ["mean", "median", "max"], "default_stats": ["mean"]},
             "LST_Night_1km": {"stats": ["mean", "median", "max"], "default_stats": ["mean"]}
@@ -773,7 +804,7 @@ PRODUCT_REGISTRY = {
         "max_date": datetime(2026, 2, 2),
         "native_resolution": "16-day composite",
         "scale": 250,
-        "cadence": "monthly",
+        "cadence": "composite",
         "content": {
             "NDVI": {"stats": ["mean", "median"], "default_stats": ["mean"]},
             "EVI": {"stats": ["mean", "median"], "default_stats": ["mean"]}
@@ -842,42 +873,51 @@ def validate_vector_file(vector_path: Path):
         raise ValueError("Uploaded vector file contains only empty geometries.")
 
 
-def save_uploaded_aoi(uploaded_file):
-    """Persist AOI upload and return a path that worker can consume."""
+def validate_uploaded_aoi(uploaded_file):
+    """Validate uploaded AOI in a temp directory without writing to the run. Raises ValueError on failure."""
     upload_bytes = uploaded_file.getvalue()
-    upload_hash = hashlib.md5(upload_bytes).hexdigest()[:12]
-    current_upload_dir = UPLOAD_DIR / upload_hash
-    current_upload_dir.mkdir(parents=True, exist_ok=True)
-
     filename = uploaded_file.name or "uploaded_aoi"
     suffix = Path(filename).suffix.lower()
 
-    if suffix == ".zip":
-        if not any(current_upload_dir.iterdir()):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        if suffix == ".zip":
             with zipfile.ZipFile(io.BytesIO(upload_bytes), 'r') as zip_ref:
-                zip_ref.extractall(current_upload_dir)
+                zip_ref.extractall(tmpdir_path)
+            shp_files = list(tmpdir_path.rglob("*.shp"))
+            if not shp_files:
+                raise ValueError("No .shp file found in uploaded ZIP.")
+            found_exts = {f.suffix.lower() for f in tmpdir_path.rglob("*") if f.is_file()}
+            missing = REQUIRED_EXTS - found_exts
+            if missing:
+                raise ValueError(f"Missing components: {', '.join(sorted(missing))}")
+            validate_vector_file(shp_files[0])
+        elif suffix in GEOJSON_EXTS or suffix in GEOPARQUET_EXTS:
+            tmp_path = tmpdir_path / filename
+            tmp_path.write_bytes(upload_bytes)
+            validate_vector_file(tmp_path)
+        else:
+            raise ValueError("Unsupported file type. Upload a ZIP shapefile, GeoJSON, or GeoParquet.")
 
-        shp_files = list(current_upload_dir.rglob("*.shp"))
-        if not shp_files:
-            raise ValueError("No .shp file found in uploaded ZIP.")
 
-        found_exts = {f.suffix.lower() for f in current_upload_dir.rglob("*") if f.is_file()}
-        missing = REQUIRED_EXTS - found_exts
-        if missing:
-            raise ValueError(f"Missing components: {', '.join(sorted(missing))}")
+def save_aoi_to_run(uploaded_file, run_id: str) -> str:
+    """Save uploaded AOI into the run's inputs directory. Returns the geometry file path."""
+    upload_bytes = uploaded_file.getvalue()
+    filename = uploaded_file.name or "uploaded_aoi"
+    suffix = Path(filename).suffix.lower()
 
-        shp_path = shp_files[0]
-        validate_vector_file(shp_path)
-        return str(shp_path), upload_hash
+    inputs_dir = run_dir(run_id) / "inputs"
+    inputs_dir.mkdir(parents=True, exist_ok=True)
 
-    if suffix in GEOJSON_EXTS or suffix in GEOPARQUET_EXTS:
-        target_path = current_upload_dir / filename
-        if not target_path.exists():
-            target_path.write_bytes(upload_bytes)
-        validate_vector_file(target_path)
-        return str(target_path), upload_hash
+    if suffix == ".zip":
+        with zipfile.ZipFile(io.BytesIO(upload_bytes), 'r') as zip_ref:
+            zip_ref.extractall(inputs_dir)
+        shp_files = list(inputs_dir.rglob("*.shp"))
+        return str(shp_files[0])
 
-    raise ValueError("Unsupported file type. Upload a ZIP shapefile, GeoJSON, or GeoParquet.")
+    target_path = inputs_dir / filename
+    target_path.write_bytes(upload_bytes)
+    return str(target_path)
 
 # --- Page Setup ---
 st.set_page_config(page_title="GEE Batch Processor", layout="wide", page_icon="🛰️")
@@ -988,7 +1028,8 @@ if resume_run_meta and resume_run_meta.get("status") == "running":
         set_run_snakemake_pid(resume_run_id, run_pid)
     if run_pid:
         st.sidebar.caption(f"Active process PID: {run_pid}")
-    if st.sidebar.button("⛔ Stop This RUN ID", key=f"stop_run_{resume_run_id}"):
+    btn_col1, btn_col2 = st.sidebar.columns(2)
+    if btn_col1.button("⛔ Stop", key=f"stop_run_{resume_run_id}"):
         if run_pid:
             stopped, message = stop_run_by_pid(run_pid)
             if stopped:
@@ -1005,6 +1046,18 @@ if resume_run_meta and resume_run_meta.get("status") == "running":
                 st.sidebar.error(message)
         else:
             st.sidebar.error("Cannot stop: no active Snakemake PID could be resolved for this run.")
+    if btn_col2.button("🔓 Unlock", key=f"unlock_run_{resume_run_id}"):
+        try:
+            subprocess.run(
+                ["snakemake", "--unlock",
+                 "--snakefile", str(Path(__file__).parent / ACTIVE_SNAKEFILE),
+                 "--directory", str(run_dir(resume_run_id))],
+                capture_output=True, text=True, timeout=10,
+                cwd=str(run_dir(resume_run_id)),
+            )
+            st.sidebar.success("Directory unlocked.")
+        except Exception as e:
+            st.sidebar.error(f"Unlock failed: {e}")
 
 if resume_run_meta:
     run_context_summary = build_run_context_summary(resume_run_meta)
@@ -1162,7 +1215,18 @@ for prod_id, info in PRODUCT_REGISTRY.items():
                     selected_start_date = date_range[0]
                     selected_end_date = date_range[1]
 
-            st.caption("Date selection follows the app processing cadence above; output is merged over the selected period.")
+            if cadence in ("daily", "composite"):
+                st.caption(
+                    f"Output will contain one row per region per {native_resolution.lower()} image within "
+                    f"the selected range. Column names follow the pattern {{band}}_{{stat}} where stat "
+                    f"is the spatial reducer applied over pixels within each region."
+                )
+            else:
+                st.caption(
+                    f"Output is temporally aggregated over the selected period ({cadence}). "
+                    f"Column names follow the pattern {{band}}_{{stat}} where stat reflects the "
+                    f"reduction applied across all images in the window (e.g. LST_Day_1km_mean)."
+                )
 
             valid_date_range = (
                 selected_start_date is not None and
@@ -1298,25 +1362,6 @@ def render_registered_run_context(run_id: str, run_meta: dict):
             else:
                 st.caption("No log lines yet.")
 
-    with st.expander("🗂️ DuckDB Run Events", expanded=False):
-        try:
-            with duckdb.connect(str(RUN_DB_PATH)) as conn:
-                events = conn.execute(
-                    """
-                    SELECT event_time, event_type, status, message
-                    FROM run_events
-                    WHERE run_id = ?
-                    ORDER BY event_time DESC
-                    LIMIT 25
-                    """,
-                    [run_id],
-                ).fetchdf()
-            if not events.empty:
-                st.dataframe(events, use_container_width=True, hide_index=True)
-            else:
-                st.caption("No events recorded yet.")
-        except Exception as event_error:
-            st.caption(f"Could not read DuckDB events: {event_error}")
 
 
 def build_partial_checkout_files(run_id: str):
@@ -1491,6 +1536,17 @@ def merge_parquet_chunks_to_output(chunk_files, output_file: Path):
     finally:
         conn.close()
 
+def parquet_to_csv_bytes(parquet_path: Path) -> bytes:
+    """Convert a GeoParquet file to a CSV with geometry removed.
+
+    Preserves wide format: one row per region per date, band/stat columns retained.
+    """
+    gdf = gpd.read_parquet(parquet_path)
+    drop_cols = [gdf.geometry.name] if gdf.geometry is not None else []
+    df = pd.DataFrame(gdf).drop(columns=drop_cols, errors="ignore")
+    return df.to_csv(index=False).encode("utf-8")
+
+
 def build_partial_checkout_files_parquet(run_id: str):
     """Build merged partial checkout GeoParquet files from completed parquet chunks."""
     run_chunk_root = intermediate_dir(run_id) / "chunks"
@@ -1533,7 +1589,7 @@ def build_partial_checkout_files_parquet(run_id: str):
 
     return sorted(merged_files)
 
-def run_pipeline(config_path, payload, run_id=None):
+def run_pipeline(config_path, payload, run_id):
     # Show execution plan from payload without blocking subprocess calls.
     stats = summarize_jobs_from_payload(payload)
     plan_col1, plan_col2, plan_col3 = st.columns(3)
@@ -1545,29 +1601,30 @@ def run_pipeline(config_path, payload, run_id=None):
         st.metric("Merge Jobs", stats["merge"])
 
     # Pre-populate the jobs table so progress is visible from the first refresh.
-    if run_id:
-        initialise_jobs(run_id, payload)
+    initialise_jobs(run_id, payload)
 
     # Launch the actual pipeline in the background to keep Streamlit responsive.
     _log_handler_script = Path(__file__).parent / "scripts" / "snakemake_log_handler.py"
+    _run_dir = run_dir(run_id)
+    _run_dir.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "snakemake", "--snakefile", ACTIVE_SNAKEFILE,
+        "snakemake", "--snakefile", str(Path(__file__).parent / ACTIVE_SNAKEFILE),
         "--configfile", str(config_path),
+        "--directory", str(_run_dir),
         "-j", "12", "--resources", "gee=3",
         "--rerun-incomplete", "--keep-going",
         "--log-handler-script", str(_log_handler_script),
     ]
 
-    run_log_path = BASE_DATA_DIR / "logs" / str(run_id or "adhoc") / "snakemake_run.log"
+    run_log_path = logs_dir(run_id) / "snakemake_run.log"
     run_log_path.parent.mkdir(parents=True, exist_ok=True)
     with open(run_log_path, "a", encoding="utf-8") as log_handle:
         log_handle.write(f"\n[{datetime.utcnow().isoformat()}] Launching: {' '.join(cmd)}\n")
 
     # Pass run context to the log handler via environment variables.
     _env = os.environ.copy()
-    if run_id:
-        _env["GEE_RUN_ID"] = run_id
-        _env["GEE_DB_PATH"] = str(RUN_DB_PATH)
+    _env["GEE_RUN_ID"] = run_id
+    _env["GEE_DB_PATH"] = str(RUN_DB_PATH)
 
     log_handle = open(run_log_path, "a", encoding="utf-8")
     process = subprocess.Popen(
@@ -1577,17 +1634,17 @@ def run_pipeline(config_path, payload, run_id=None):
         text=True,
         close_fds=True,
         env=_env,
+        cwd=str(_run_dir),
     )
     log_handle.close()
 
-    if run_id:
-        set_run_execution_metadata(
-            run_id=run_id,
-            pid=process.pid,
-            log_path=str(run_log_path),
-            config_path=str(config_path),
-            snakefile=ACTIVE_SNAKEFILE,
-        )
+    set_run_execution_metadata(
+        run_id=run_id,
+        pid=process.pid,
+        log_path=str(run_log_path),
+        config_path=str(config_path),
+        snakefile=ACTIVE_SNAKEFILE,
+    )
 
     st.success(
         f"🚀 Pipeline submitted in background (RUN ID: {run_id}, PID: {process.pid}). "
@@ -1648,29 +1705,31 @@ with col_upload:
     )
 
     shp_path = None
+    aoi_ready = False
     registry_payload = (resume_run_meta or {}).get("payload", {}) if resume_run_meta else {}
     registry_shp_path = registry_payload.get("shp_path")
 
     if resume_run_id and registry_shp_path and Path(registry_shp_path).exists():
         shp_path = registry_shp_path
-        st.info(f"Using shapefile linked to RUN ID {resume_run_id}: {Path(registry_shp_path).name}")
+        aoi_ready = True
+        st.info(f"Using geometry linked to RUN ID {resume_run_id}: {Path(registry_shp_path).name}")
         if uploaded_aoi is not None:
             st.warning("Uploaded AOI ignored while resuming this RUN ID to keep geometry consistent.")
     elif uploaded_aoi:
         try:
-            shp_path, upload_hash = save_uploaded_aoi(uploaded_aoi)
-            st.success(f"Verified: {Path(shp_path).name}")
-            st.caption(f"AOI storage key: {upload_hash}")
+            validate_uploaded_aoi(uploaded_aoi)
+            aoi_ready = True
+            st.success(f"Verified: {uploaded_aoi.name}")
         except Exception as upload_error:
             st.error(str(upload_error))
     elif resume_run_id and registry_shp_path and not Path(registry_shp_path).exists():
-        st.warning("Stored shapefile for this RUN ID was not found on disk. Upload the same ZIP to continue consistently.")
+        st.warning("Stored geometry file for this RUN ID was not found on disk. Upload the same file to continue consistently.")
 
     if failed_resume_payload:
         st.info("A failed run was detected for this RUN ID. Clicking resume will reuse the saved configuration.")
 
     # --- Start Pipeline ---
-    can_resume_failed = bool(failed_resume_payload and shp_path)
+    can_resume_failed = bool(failed_resume_payload and aoi_ready)
     _active_run_id, _active_pid = get_active_run()
     _another_run_active = (
         _active_run_id is not None
@@ -1682,7 +1741,7 @@ with col_upload:
             "Stop it or wait for it to finish before starting a new run."
         )
     btn_ready = (
-        ((shp_path and product_configs) or can_resume_failed)
+        ((aoi_ready and product_configs) or can_resume_failed)
         and not st.session_state.pipeline_running
         and not _another_run_active
     )
@@ -1696,6 +1755,8 @@ with col_upload:
     if st.button(btn_label, type="primary", disabled=not btn_ready):
         if can_resume_failed:
             run_id = resume_run_id
+            if uploaded_aoi is not None:
+                shp_path = save_aoi_to_run(uploaded_aoi, run_id)
             payload = dict(failed_resume_payload or {})
             payload["run_id"] = run_id
             payload["shp_path"] = shp_path
@@ -1703,6 +1764,8 @@ with col_upload:
             payload.setdefault("chain_parallel_window", 3)
         else:
             run_id = resume_run_id if resume_run_id else generate_run_id(6)
+            if uploaded_aoi is not None:
+                shp_path = save_aoi_to_run(uploaded_aoi, run_id)
 
             # Freeze the run configuration so UI changes during execution do not affect this run
             product_tasks = {}
@@ -1757,25 +1820,26 @@ with col_upload:
             st.stop()
 
         st.info("🔒 Run configuration is locked for this submission. Any UI changes apply to the next run.")
-        if active_run_id:
-            st.info(f"🆔 RUN ID: {active_run_id}")
+        st.info(f"🆔 RUN ID: {active_run_id}")
 
         # Only unlock stale lock files when no live Snakemake process holds them.
         # Unlocking while another process is running would corrupt that run.
         if not list_snakemake_pids():
             try:
-                unlock_cmd = [
-                    "snakemake", "--unlock",
-                    "--snakefile", f"/app/{ACTIVE_SNAKEFILE}",
-                    "--directory", "/app"
-                ]
-                subprocess.run(unlock_cmd, capture_output=True, text=True, timeout=10)
+                _active_dir = run_dir(active_run_id)
+                subprocess.run(
+                    ["snakemake", "--unlock",
+                     "--snakefile", str(Path(__file__).parent / ACTIVE_SNAKEFILE),
+                     "--directory", str(_active_dir)],
+                    capture_output=True, text=True, timeout=10,
+                    cwd=str(_active_dir),
+                )
             except Exception:
                 pass
 
         config_path = CONFIG_DIR / f"config_{uuid.uuid4().hex[:8]}.yaml"
         with open(config_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(payload, f, sort_keys=False)
+            yaml.safe_dump({**payload, "app_dir": str(Path(__file__).parent)}, f, sort_keys=False)
 
         try:
             update_run_registry(
@@ -1810,39 +1874,41 @@ with col_upload:
 
 with col_status:
     st.header("3. Results")
-    # Refresh logic for files
-    default_results_run_id = st.session_state.get("last_completed_run_id") or resume_run_id
-    results_run_id = sanitize_run_id(
-        st.text_input(
-            "Results RUN ID (optional)",
-            value=default_results_run_id,
-            help="Filter downloads to one run ID. Leave blank to show all runs."
-        )
-    )
+    results_run_id = st.session_state.get("last_completed_run_id") or resume_run_id
 
     if results_run_id:
         _rdir = results_dir(results_run_id)
         parquet_files = sorted(_rdir.rglob("*.parquet")) if _rdir.exists() else []
         csv_files = sorted(_rdir.rglob("*.csv")) if _rdir.exists() else []
+        st.caption(f"RUN ID: {results_run_id}")
     else:
-        parquet_files = sorted(RUNS_DIR.glob("*/results/**/*.parquet"))
-        csv_files = sorted(RUNS_DIR.glob("*/results/**/*.csv"))
+        parquet_files = []
+        csv_files = []
 
     if parquet_files or csv_files:
-        if results_run_id:
-            st.caption(f"Showing files for RUN ID: {results_run_id}")
 
         if parquet_files:
             st.caption("GeoParquet outputs (recommended)")
         for file_path in parquet_files:
             rel = file_path.relative_to(RUNS_DIR)
-            st.download_button(
-                label=f"📥 Download {rel}",
-                data=file_path.read_bytes(),
-                file_name=file_path.name,
-                mime="application/octet-stream",
-                key=f"dl_parquet_{str(rel).replace('/', '_')}"
-            )
+            st.caption(file_path.name)
+            dl_col, csv_col = st.columns([1, 1])
+            with dl_col:
+                st.download_button(
+                    label="📥 GeoParquet",
+                    data=file_path.read_bytes(),
+                    file_name=file_path.name,
+                    mime="application/octet-stream",
+                    key=f"dl_parquet_{str(rel).replace('/', '_')}"
+                )
+            with csv_col:
+                st.download_button(
+                    label="📄 CSV",
+                    data=parquet_to_csv_bytes(file_path),
+                    file_name=file_path.stem + ".csv",
+                    mime="text/csv",
+                    key=f"dl_csv_{str(rel).replace('/', '_')}"
+                )
 
         if csv_files:
             st.caption("Legacy CSV outputs")
@@ -1902,13 +1968,25 @@ with col_status:
             if parquet_checkout_files:
                 st.caption("GeoParquet partial files")
             for merged_file in parquet_checkout_files:
-                st.download_button(
-                    label=f"📥 Partial {merged_file.relative_to(_partial_root)}",
-                    data=merged_file.read_bytes(),
-                    file_name=merged_file.name,
-                    mime="application/octet-stream",
-                    key=f"dl_partial_pq_{str(merged_file.relative_to(_partial_root)).replace('/', '_')}"
-                )
+                _prel = merged_file.relative_to(_partial_root)
+                st.caption(merged_file.name)
+                dl_col, csv_col = st.columns([1, 1])
+                with dl_col:
+                    st.download_button(
+                        label="📥 GeoParquet",
+                        data=merged_file.read_bytes(),
+                        file_name=merged_file.name,
+                        mime="application/octet-stream",
+                        key=f"dl_partial_pq_{str(_prel).replace('/', '_')}"
+                    )
+                with csv_col:
+                    st.download_button(
+                        label="📄 CSV",
+                        data=parquet_to_csv_bytes(merged_file),
+                        file_name=merged_file.stem + ".csv",
+                        mime="text/csv",
+                        key=f"dl_partial_csv_ng_{str(_prel).replace('/', '_')}"
+                    )
 
             if csv_checkout_files:
                 st.caption("Legacy CSV partial files")
@@ -1922,206 +2000,3 @@ with col_status:
                 )
         else:
             st.info("No merged partial checkout files yet. Click refresh once some chunks are completed.")
-
-# --- Data Explorer ---
-st.divider()
-st.header("5. Data Explorer")
-st.caption("Browse and query GeoParquet results without writing code. Powered by DuckDB.")
-
-@st.cache_data(show_spinner=False)
-def _get_parquet_date_bounds(file_path: str, date_col: str):
-    """Return (min_date, max_date) strings for a parquet file column. Cached per file."""
-    with duckdb.connect(":memory:") as conn:
-        return conn.execute(
-            f"SELECT MIN({date_col}::VARCHAR), MAX({date_col}::VARCHAR) FROM read_parquet(?)",
-            [file_path]
-        ).fetchone()
-
-
-@st.cache_data(ttl=30, show_spinner=False)
-def _catalog_parquet_files():
-    """Return a list of dicts describing every result .parquet file under RUNS_DIR."""
-    rows = []
-    for f in sorted(RUNS_DIR.glob("*/results/**/*.parquet")):
-        # path is: RUNS_DIR / <run_id> / results / [partial_checkout/] <product> / <file>
-        parts = f.relative_to(RUNS_DIR).parts  # (run_id, "results", [product | "partial_checkout", ...])
-        run_id  = parts[0] if len(parts) > 0 else "?"
-        # skip partial_checkout files from the catalog
-        if "partial_checkout" in parts:
-            continue
-        product = parts[2] if len(parts) > 2 else "?"
-        rows.append({
-            "Run ID":  run_id,
-            "Product": product,
-            "File":    f.name,
-            "Size MB": round(f.stat().st_size / 1_048_576, 2),
-            "_path":   str(f),
-        })
-    return rows
-
-catalog_rows = _catalog_parquet_files()
-
-if not catalog_rows:
-    st.info("No GeoParquet result files found yet. Run the pipeline first to generate data.")
-else:
-    df_cat = pd.DataFrame(catalog_rows)
-
-    # --- Catalog filters ---
-    exp_col1, exp_col2 = st.columns([1, 3])
-    with exp_col1:
-        run_opts = ["All"] + sorted(df_cat["Run ID"].unique().tolist())
-        filter_run = st.selectbox("Filter by Run ID", run_opts, key="explorer_run_filter")
-    with exp_col2:
-        filter_name = st.text_input("Search filename", key="explorer_name_filter", placeholder="e.g. CHIRPS")
-
-    view = df_cat.copy()
-    if filter_run != "All":
-        view = view[view["Run ID"] == filter_run]
-    if filter_name.strip():
-        view = view[view["File"].str.contains(filter_name.strip(), case=False, na=False)]
-
-    st.dataframe(view.drop(columns=["_path"]), use_container_width=True, hide_index=True)
-    st.caption(f"{len(view)} file(s) shown")
-
-    if view.empty:
-        st.stop()
-
-    # --- File selector ---
-    file_labels = [
-        f"{r['Run ID']} / {r['Product']} / {r['File']}"
-        for _, r in view.iterrows()
-    ]
-    file_paths = view["_path"].tolist()
-
-    selected_label = st.selectbox(
-        "Select a file to explore",
-        options=file_labels,
-        key="explorer_file_select",
-    )
-    selected_file = file_paths[file_labels.index(selected_label)]
-
-    # --- Introspect schema + row count via DuckDB ---
-    try:
-        _conn = duckdb.connect(":memory:")
-        schema_rows = _conn.execute(
-            f"DESCRIBE SELECT * FROM read_parquet(?) LIMIT 0",
-            [selected_file]
-        ).fetchall()
-        schema_df = pd.DataFrame(schema_rows, columns=["Column", "Type", "Null", "Key", "Default", "Extra"])
-        try:
-            row_count = pq.read_metadata(selected_file).num_rows
-        except Exception:
-            row_count = _conn.execute(
-                "SELECT COUNT(*) FROM read_parquet(?)", [selected_file]
-            ).fetchone()[0]
-
-        # Detect geometry columns (WKB binary) to exclude from preview
-        geo_cols = {r[0] for r in schema_rows if r[1].upper() in ("BLOB", "GEOMETRY", "VARCHAR")
-                    and r[0].lower() in ("geom", "geometry", "wkb_geometry", "shape")}
-        non_geo_cols = [r[0] for r in schema_rows if r[0] not in geo_cols]
-        date_cols   = [r[0] for r in schema_rows if "DATE" in r[1].upper() or r[0].lower() == "date"]
-        num_cols    = [r[0] for r in schema_rows if any(t in r[1].upper()
-                        for t in ("INT", "FLOAT", "DOUBLE", "DECIMAL", "BIGINT", "HUGEINT"))]
-
-        # --- Metadata panel ---
-        m1, m2, m3 = st.columns(3)
-        with m1:
-            st.metric("Rows", f"{row_count:,}")
-        with m2:
-            st.metric("Columns", len(schema_rows))
-        with m3:
-            st.metric("Geometry columns", len(geo_cols))
-
-        with st.expander("Schema", expanded=False):
-            st.dataframe(schema_df[["Column", "Type"]], use_container_width=True, hide_index=True)
-
-        # --- No-code filter builder ---
-        st.subheader("Filter data")
-        filter_clauses = []
-
-        if date_cols:
-            date_col = date_cols[0]
-            try:
-                date_bounds = _get_parquet_date_bounds(selected_file, date_col)
-                if date_bounds and date_bounds[0] and date_bounds[1]:
-                    fc1, fc2 = st.columns(2)
-                    with fc1:
-                        date_from = st.text_input(
-                            f"{date_col} from (YYYY-MM-DD)",
-                            value=str(date_bounds[0])[:10],
-                            key="explorer_date_from"
-                        )
-                    with fc2:
-                        date_to = st.text_input(
-                            f"{date_col} to (YYYY-MM-DD)",
-                            value=str(date_bounds[1])[:10],
-                            key="explorer_date_to"
-                        )
-                    if date_from:
-                        filter_clauses.append(f"{date_col}::VARCHAR >= '{date_from}'")
-                    if date_to:
-                        filter_clauses.append(f"{date_col}::VARCHAR <= '{date_to}'")
-            except Exception:
-                pass
-
-        col_filter = st.multiselect(
-            "Show columns",
-            options=non_geo_cols,
-            default=non_geo_cols[:12],  # sane default
-            key="explorer_col_select",
-        )
-        if not col_filter:
-            col_filter = non_geo_cols
-
-        row_limit = st.slider("Preview rows", min_value=10, max_value=2000, value=200, step=10,
-                              key="explorer_row_limit")
-
-        # Build preview query
-        safe_cols = ", ".join(f'"{c}"' for c in col_filter)
-        where_clause = f"WHERE {' AND '.join(filter_clauses)}" if filter_clauses else ""
-        preview_sql = (
-            f"SELECT {safe_cols} FROM read_parquet('{selected_file}') "
-            f"{where_clause} LIMIT {row_limit}"
-        )
-
-        # --- SQL override ---
-        with st.expander("Custom SQL (advanced)", expanded=False):
-            st.caption(f"Default query (editable). Use `read_parquet('{selected_file}')` as the table.")
-            custom_sql = st.text_area(
-                "SQL",
-                value=preview_sql,
-                height=120,
-                key="explorer_sql",
-                label_visibility="collapsed",
-            )
-            use_custom = st.checkbox("Use custom SQL instead of filter above", key="explorer_use_custom")
-            if use_custom:
-                preview_sql = custom_sql
-
-        # --- Run query and show results ---
-        if st.button("Run / Refresh", key="explorer_run_btn"):
-            st.session_state["explorer_last_sql"] = preview_sql
-
-        active_sql = st.session_state.get("explorer_last_sql", preview_sql)
-
-        try:
-            result_df = _conn.execute(active_sql).df()
-            st.caption(f"Showing {len(result_df):,} rows · {len(result_df.columns)} columns")
-            st.dataframe(result_df, use_container_width=True, hide_index=True)
-
-            # Download filtered result
-            csv_bytes = result_df.to_csv(index=False).encode()
-            st.download_button(
-                "Download result as CSV",
-                data=csv_bytes,
-                file_name=f"explorer_{Path(selected_file).stem}_filtered.csv",
-                mime="text/csv",
-                key="explorer_download",
-            )
-        except Exception as e:
-            st.error(f"Query error: {e}")
-
-        _conn.close()
-
-    except Exception as e:
-        st.error(f"Could not read parquet file: {e}")
