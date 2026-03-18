@@ -44,7 +44,7 @@ docker compose up -d app
 
 :: --- Wait for UI, then open browser ---
 echo Waiting for the app to start...
-powershell -Command "$port='%APP_PORT%'; for($i=0;$i-lt 30;$i++){try{Invoke-WebRequest -Uri \"http://localhost:$port\" -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop | Out-Null; exit 0}catch{Start-Sleep 1}}; exit 1"
+powershell -Command "$port='%APP_PORT%'; for($i=0;$i-lt 30;$i++){if(Test-NetConnection -ComputerName '127.0.0.1' -Port $port -InformationLevel Quiet){exit 0}; Start-Sleep 1}; exit 1"
 if errorlevel 1 (
     echo.
     echo  The app did not respond after 30 seconds.
