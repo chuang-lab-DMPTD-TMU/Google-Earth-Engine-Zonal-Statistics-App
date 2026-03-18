@@ -34,12 +34,13 @@ if not defined APP_PORT (
 echo Selected port: %APP_PORT%
 
 :: --- Write APP_PORT to .env so docker compose reliably picks it up ---
-powershell -Command "$lines = (Get-Content '.env') -notmatch '^APP_PORT='; $lines + 'APP_PORT=%APP_PORT%' | Set-Content '.env'"
+echo APP_PORT=%APP_PORT%> .env
 
 :: --- Build and start ---
 echo Starting GEE Batch Processor on port %APP_PORT%...
 docker compose build app
-docker compose up -d --force-recreate app
+docker compose down
+docker compose up -d app
 
 :: --- Wait for UI, then open browser ---
 echo Waiting for the app to start...
