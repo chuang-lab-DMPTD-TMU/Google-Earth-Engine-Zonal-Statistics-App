@@ -20,6 +20,7 @@ A practical guide from cloning the repository to querying your downloaded result
 7. [Querying with DuckDB directly](#7-querying-with-duckdb-directly)
 8. [Stopping, resuming, and housekeeping](#8-stopping-resuming-and-housekeeping)
 9. [Troubleshooting](#9-troubleshooting)
+10. [For developers](#10-for-developers)
 
 ---
 
@@ -113,18 +114,14 @@ The script does three things:
 
 1. Exports your host UID/GID so files created inside the container are owned by you.
 2. Runs `docker compose build app` — downloads the base image and installs Python dependencies. **This takes 3–10 minutes on the first run** and is cached for subsequent launches.
-3. Starts the container in detached mode and polls `http://localhost:8501` until the UI responds, then prints:
+3. Starts the container in detached mode, picks the first free port from 8501–8505, and polls it until the UI responds, then prints the URL (e.g. `Streamlit UI is ready at http://localhost:8501`).
 
-   ```
-   🚀 Streamlit UI is ready at http://localhost:8501
-   ```
-
-Open **http://localhost:8501** in your browser.
+Open the printed URL in your browser.
 
 **To stop the app** when you are done:
 
 ```bash
-docker compose down
+./stop.sh
 ```
 
 **To restart without rebuilding** (after the image already exists):
@@ -264,7 +261,7 @@ Section **5. Data Explorer** (at the bottom of the page, below a divider) lets y
 
 ### Step 1 — Find your file in the catalog
 
-The catalog table lists every `.parquet` file under `data/results/`, with:
+The catalog table lists every `.parquet` file under `data/runs/`, with:
 
 | Column | Meaning |
 |--------|---------|
@@ -313,13 +310,13 @@ Example queries:
 ```sql
 -- Monthly mean precipitation for region 42
 SELECT "Date", "region_id", "precipitation_sum"
-FROM read_parquet('/app/data/results/ABC123/CHIRPS/CHIRPS_2020-01-01_to_2024-12-31.parquet')
+FROM read_parquet('/app/data/runs/ABC123/results/CHIRPS/CHIRPS_2020-01-01_to_2024-12-31.parquet')
 WHERE "region_id" = 42
 ORDER BY "Date"
 
 -- Hottest months (mean day LST > 305 K)
 SELECT "Date", AVG("LST_Day_1km_mean") AS avg_lst
-FROM read_parquet('/app/data/results/XYZ/MODIS_LST/MODIS_LST_2000-02-18_to_2026-02-10.parquet')
+FROM read_parquet('/app/data/runs/XYZ/results/MODIS_LST/MODIS_LST_2000-02-18_to_2026-02-10.parquet')
 GROUP BY "Date"
 HAVING avg_lst > 305
 ORDER BY avg_lst DESC
@@ -342,7 +339,7 @@ duckdb
 
 # Then inside DuckDB:
 LOAD spatial;
-SELECT * FROM read_parquet('/app/data/results/<run_id>/<product>/*.parquet') LIMIT 5;
+SELECT * FROM read_parquet('/app/data/runs/<run_id>/results/<product>/*.parquet') LIMIT 5;
 ```
 
 ### From Python (outside the container)
@@ -355,7 +352,7 @@ conn = duckdb.connect()  # in-memory
 # Query a result file directly
 df = conn.execute("""
     SELECT *
-    FROM read_parquet('data/results/<run_id>/<product>/<file>.parquet')
+    FROM read_parquet('data/runs/<run_id>/results/<product>/<file>.parquet')
     LIMIT 1000
 """).df()
 
@@ -395,7 +392,7 @@ FROM read_parquet('path/to/file.parquet');
 
 -- Query multiple runs at once with a glob
 SELECT *, filename
-FROM read_parquet('data/results/*/CHIRPS/*.parquet', filename=true);
+FROM read_parquet('data/runs/*/results/CHIRPS/*.parquet', filename=true);
 
 -- Export a filtered subset back to parquet
 COPY (
@@ -440,9 +437,9 @@ In the sidebar, expand **Local RUN registry** → select the run → click **Del
 |---------|-------------|-----|
 | UI never loads after `quickstart.sh` | Port 8501 blocked or image build failed | `docker compose logs -f app` to inspect |
 | "GEE authentication error" | `gee-key.json` missing or wrong path | Confirm file is at `config/gee-key.json` |
-| Pipeline hangs at 0 chunks | GEE rate limit or network issue | Wait 2 min; check `data/logs/<run_id>/snakemake_run.log` |
+| Pipeline hangs at 0 chunks | GEE rate limit or network issue | Wait 2 min; check `data/runs/<run_id>/logs/snakemake_run.log` |
 | Run shows `failed` immediately | Snakemake lock from a prior crash | Run the unlock command above, then retry |
-| Data Explorer shows no files | No completed runs yet, or wrong Results RUN ID | Check `data/results/` directory |
+| Data Explorer shows no files | No completed runs yet, or wrong Results RUN ID | Check `data/runs/` directory |
 | "Could not read parquet file" in Explorer | Partial/corrupt file from an incomplete run | Use Partial Checkout (§4) for in-progress runs |
 | File ownership issues on Linux | UID/GID mismatch | `./quickstart.sh` fixes this automatically by exporting `HOST_UID`/`HOST_GID` |
 
@@ -450,6 +447,67 @@ In the sidebar, expand **Local RUN registry** → select the run → click **Del
 
 | Log | Path |
 |-----|------|
-| Snakemake run log | `data/logs/<run_id>/snakemake_run.log` |
+| Snakemake run log | `data/runs/<run_id>/logs/snakemake_run.log` |
 | Container stdout | `docker compose logs app` |
 | Run event history | `data/runs/run_state.duckdb` → `run_events` table |
+
+---
+
+## 10. For developers
+
+### Directory layout
+
+```
+gee_web_app/
+├── data/              # runtime data (not committed to git)
+│   ├── uploads/       # AOI geometry files, deduplicated by content hash
+│   └── runs/          # all per-run output
+│       ├── <run_id>/
+│       │   ├── results/      # final merged .parquet / .csv files
+│       │   ├── logs/         # snakemake_run.log
+│       │   ├── intermediate/ # chunk working files
+│       │   └── run.yaml      # frozen run configuration
+│       └── run_state.duckdb  # run status and event history
+├── config/            # GEE service account key (not committed to git)
+│   └── gee-key.json
+├── scripts/           # worker scripts called by Snakemake
+├── main.py            # Streamlit application (UI + pipeline launcher)
+├── Snakefile_parquet  # Snakemake workflow orchestrator
+├── quickstart.sh      # builds + launches Docker; picks a free port (8501–8505)
+├── stop.sh            # stops the running container
+├── docker-compose.yml # service definition
+├── Dockerfile         # base image, system deps, pip install
+└── requirements.txt
+```
+
+### Live container logs
+
+```bash
+docker compose logs -f app
+```
+
+### Open a shell inside the container
+
+```bash
+docker compose exec app bash
+```
+
+### Port selection
+
+`quickstart.sh` tries ports 8501–8505 and uses the first one that is free. To change the candidate list, edit the `PORTS` array at the top of `quickstart.sh`.
+
+### File ownership on Linux
+
+`quickstart.sh` exports `HOST_UID` and `HOST_GID` before starting the container so that files written inside the container are owned by your host user. If you start the container manually (e.g. `docker compose up -d`), export those variables first:
+
+```bash
+export HOST_UID=$(id -u) HOST_GID=$(id -g)
+docker compose up -d app
+```
+
+### Inspecting the Snakemake DAG
+
+```bash
+docker compose exec app bash
+snakemake --dag --snakefile Snakefile_parquet --directory /app | dot -Tsvg > dag.svg
+```

@@ -1,101 +1,61 @@
 # GEE Web App
 
-This repository bundles the Streamlit + Snakemake workflow that drives the
-Earth Engine batch processor. Everything you need to run it locally is inside the
-codebase and the Docker definition, so cloning and running `./quickstart.sh` is
-all you need to open the app in your browser.
+A browser-based tool for downloading satellite data (precipitation, temperature, vegetation, land cover, and more) from Google Earth Engine for any area you choose.
 
-## Requirements
+---
 
-- **Docker** (Engine + Compose) installed on your machine
-- Enough disk space for intermediate chunks and final results (see `data/`,
-  `results/`, `chunks/`, `runs/`)
+## Before you start
 
-## Quick start
+You need two things:
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/<your-org>/gee_web_app.git
-   cd gee_web_app
+**1. Docker Desktop**
+This is the only software you need to install. Download it from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop) and follow the installer. Once it is installed and running, you are ready.
+
+**2. A Google Earth Engine key file**
+A small file (ending in `.json`) that gives the app access to Google Earth Engine. If you do not have one yet, see [Getting a key](#getting-a-key) below.
+
+---
+
+## Starting the app
+
+1. Put the `gee_web_app` folder somewhere on your computer.
+
+2. Open a terminal inside that folder.
+   - **Mac:** right-click the folder in Finder → **New Terminal at Folder**
+   - **Windows:** open the folder, click the address bar, type `cmd`, press Enter
+
+3. Type the following and press Enter:
    ```
-2. Make sure the entry script is executable:
-   ```bash
-   chmod +x quickstart.sh
-   ```
-3. Run the helper:
-   ```bash
    ./quickstart.sh
    ```
-   The script builds the `app` service, launches it in detached mode, waits until
-   Streamlit answers on `localhost:8501`, and prints the URL when it is ready.
-4. Open `http://localhost:8501` in your browser and follow the prompts.
+   The first time you do this it will take a few minutes to set up. When it is ready you will see a message with a link, for example:
+   ```
+   Streamlit UI is ready at http://localhost:8501
+   ```
 
-## Authentication
+4. Click that link (or paste it into your browser). The app opens.
 
-The UI contains a dedicated Earth Engine authentication drawer. When the app
-starts for the first time it will give you a short-lived code and a link to open
-in your browser. Paste that code back into the UI prompt to finish the
-handshake. Once the token is cached, it is reused for later runs until the
-session expires.
+---
 
-If you prefer to authenticate manually before the UI starts, you can also run
-`docker compose exec app ee authenticate` (or activate your virtual environment
-and run `earthengine authenticate` before launching the container).
+## Stopping the app
 
-## Data & logs locations
-
-- `data/` holds the uploaded geometries plus chunk storage (`geojson_chunks`,
-  `pq_chunks`).
-- `results/` hosts the final merged files (`.parquet`/`.csv`).
-- `runs/` keeps the YAML registry for each RUN ID.
-- `logs/` contains Snakemake logs per run (`data/logs/<run_id>/snakemake_run.log`).
-- `config/` stores reusable input configurations.
-
-All of the directories live under `/app/data` inside the container and are
-mounted to this repo’s `data/` folder, so everything survives container
-restarts.
-
-## Development & troubleshooting
-
-- To watch logs in real time:
-  ```bash
-  docker compose logs -f app
-  ```
-- To open a shell inside the container:
-  ```bash
-  docker compose exec app bash
-  ```
-- When you are done working, stop the service:
-  ```bash
-  docker compose down
-  ```
-
-## Directory layout (self-contained)
-
+When you are done, go back to the terminal and type:
 ```
-gee_web_app/
-├── data/              # uploads, chunks, parquet working directories
-├── results/           # final merged files grouped by RUN ID
-├── runs/              # run registry and YAML payload snapshots
-├── scripts/           # Snakemake helper scripts (GEE → GeoJSON → Parquet)
-├── Snakefile_parquet  # main orchestrator for the production workflow
-├── quickstart.sh      # builds + launches Docker (self-contained entry point)
-├── docker-compose.yml # defines the app service
-├── Dockerfile         # base image, system dependencies, and pip install
-└── README.md          # this file
+./stop.sh
 ```
 
-## Customization notes
+Closing the browser tab does not stop the app — you need to run `stop.sh`.
 
-- `HOST_UID` and `HOST_GID` are exported by the entry script so files created
-  by the container match your host UID.
-- If you want to inspect the Snakemake graph manually, run:
-  ```bash
-  docker compose exec app streamlit run main.py
-  ```
-  (the script already does this for you, so this is only needed for advanced debugging.)
-- Results are written in GeoParquet by default; there are download buttons in
-  the UI to pull `.parquet` or legacy `.csv` files for each run.
+---
 
-Enjoy the self-contained workflow—just pull the repo, build the image, and the
-UI plus Earth Engine auth flow are all inside the container.
+## Getting a key
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/iam-admin/serviceaccounts) and select your project.
+2. Open or create a service account that has the **Earth Engine** role.
+3. Click **Keys → Add Key → Create new key → JSON** and download the file.
+
+The first time you open the app it will ask you to upload this file. After that it remembers it and you will not be asked again.
+
+---
+
+For a full guide on using the app, see the [User Manual](USER_MANUAL.md).
