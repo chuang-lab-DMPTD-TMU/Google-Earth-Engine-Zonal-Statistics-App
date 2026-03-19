@@ -538,8 +538,7 @@ def get_expected_result_files(payload: dict):
         start_date = prod_cfg.get("start_date")
         end_date = prod_cfg.get("end_date")
         parquet_path = results_dir(run_id) / prod_id / f"{prod_id}_{start_date}_to_{end_date}.parquet"
-        csv_path = results_dir(run_id) / prod_id / f"{prod_id}_{start_date}_to_{end_date}.csv"
-        expected.append(parquet_path if parquet_path.exists() else csv_path)
+        expected.append(parquet_path)
     return expected
 
 def reconcile_run_status(run_id: str, run_meta):
@@ -840,12 +839,13 @@ PRODUCT_REGISTRY = {
         "native_resolution": "Annual",
         "scale": 500,
         "cadence": "annual",
+        "categorical": True,
         "content": {
-            "LC_Type1": {"stats": ["mean", "sum"], "default_stats": ["mean"]},
-            "LC_Type2": {"stats": ["mean", "sum"], "default_stats": ["mean"]},
-            "LC_Type3": {"stats": ["mean", "sum"], "default_stats": ["mean"]},
-            "LC_Type4": {"stats": ["mean", "sum"], "default_stats": ["mean"]},
-            "LC_Type5": {"stats": ["mean", "sum"], "default_stats": ["mean"]}
+            "LC_Type1": {"stats": ["histogram"], "default_stats": ["histogram"]},
+            "LC_Type2": {"stats": ["histogram"], "default_stats": ["histogram"]},
+            "LC_Type3": {"stats": ["histogram"], "default_stats": ["histogram"]},
+            "LC_Type4": {"stats": ["histogram"], "default_stats": ["histogram"]},
+            "LC_Type5": {"stats": ["histogram"], "default_stats": ["histogram"]}
         },
         "info": "MODIS Land Cover Type (500m resolution, annual product, multiple classification schemes)."
     }
@@ -859,7 +859,7 @@ def validate_vector_file(vector_path: Path):
     """Validate uploaded vector file can be read and has geometry."""
     suffix = vector_path.suffix.lower()
     if suffix in GEOPARQUET_EXTS:
-        gdf = gpd.read_parquet(vector_path)
+        gdf = gpd.read_parquet(vector_path, columns=["geometry"])
     else:
         gdf = gpd.read_file(vector_path)
 
@@ -873,14 +873,14 @@ def validate_vector_file(vector_path: Path):
 
 def validate_uploaded_aoi(uploaded_file):
     """Validate uploaded AOI in a temp directory without writing to the run. Raises ValueError on failure."""
-    upload_bytes = uploaded_file.getvalue()
     filename = uploaded_file.name or "uploaded_aoi"
     suffix = Path(filename).suffix.lower()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         if suffix == ".zip":
-            with zipfile.ZipFile(io.BytesIO(upload_bytes), 'r') as zip_ref:
+            uploaded_file.seek(0)
+            with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
                 zip_ref.extractall(tmpdir_path)
             shp_files = list(tmpdir_path.rglob("*.shp"))
             if not shp_files:
@@ -892,7 +892,9 @@ def validate_uploaded_aoi(uploaded_file):
             validate_vector_file(shp_files[0])
         elif suffix in GEOJSON_EXTS or suffix in GEOPARQUET_EXTS:
             tmp_path = tmpdir_path / filename
-            tmp_path.write_bytes(upload_bytes)
+            uploaded_file.seek(0)
+            with open(tmp_path, 'wb') as f:
+                shutil.copyfileobj(uploaded_file, f, length=8 * 1024 * 1024)
             validate_vector_file(tmp_path)
         else:
             raise ValueError("Unsupported file type. Upload a ZIP shapefile, GeoJSON, or GeoParquet.")
@@ -900,7 +902,6 @@ def validate_uploaded_aoi(uploaded_file):
 
 def save_aoi_to_run(uploaded_file, run_id: str) -> str:
     """Save uploaded AOI into the run's inputs directory. Returns the geometry file path."""
-    upload_bytes = uploaded_file.getvalue()
     filename = uploaded_file.name or "uploaded_aoi"
     suffix = Path(filename).suffix.lower()
 
@@ -908,13 +909,16 @@ def save_aoi_to_run(uploaded_file, run_id: str) -> str:
     inputs_dir.mkdir(parents=True, exist_ok=True)
 
     if suffix == ".zip":
-        with zipfile.ZipFile(io.BytesIO(upload_bytes), 'r') as zip_ref:
+        uploaded_file.seek(0)
+        with zipfile.ZipFile(uploaded_file, 'r') as zip_ref:
             zip_ref.extractall(inputs_dir)
         shp_files = list(inputs_dir.rglob("*.shp"))
         return str(shp_files[0])
 
     target_path = inputs_dir / filename
-    target_path.write_bytes(upload_bytes)
+    uploaded_file.seek(0)
+    with open(target_path, 'wb') as f:
+        shutil.copyfileobj(uploaded_file, f, length=8 * 1024 * 1024)
     return str(target_path)
 
 # --- Page Setup ---
@@ -1370,9 +1374,12 @@ def parquet_to_csv_bytes(parquet_path: Path) -> bytes:
     csv_path = parquet_path.with_suffix(".csv")
     if csv_path.exists():
         return csv_path.read_bytes()
-    gdf = gpd.read_parquet(parquet_path)
-    drop_cols = [gdf.geometry.name] if gdf.geometry is not None else []
-    df = pd.DataFrame(gdf).drop(columns=drop_cols, errors="ignore")
+    import pyarrow.parquet as pq
+    schema = pq.read_schema(parquet_path)
+    geo_meta = schema.metadata.get(b"geo") if schema.metadata else None
+    geom_col = json.loads(geo_meta).get("primary_column", "geometry") if geo_meta else "geometry"
+    non_geom_cols = [c for c in schema.names if c != geom_col]
+    df = pd.read_parquet(parquet_path, columns=non_geom_cols)
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     csv_path.write_bytes(csv_bytes)
     return csv_bytes
@@ -1563,7 +1570,8 @@ with col_upload:
                 product_tasks[p_id] = {
                     **p_conf,
                     "time_chunks": get_time_chunks(p_conf["start_date"], p_conf["end_date"], cadence),
-                    "cadence": cadence
+                    "cadence": cadence,
+                    "categorical": PRODUCT_REGISTRY[p_id].get("categorical", False)
                 }
 
             payload = {
@@ -1668,13 +1676,11 @@ with col_status:
     if results_run_id:
         _rdir = results_dir(results_run_id)
         parquet_files = sorted(_rdir.rglob("*.parquet")) if _rdir.exists() else []
-        csv_files = sorted(_rdir.rglob("*.csv")) if _rdir.exists() else []
         st.caption(f"RUN ID: {results_run_id}")
     else:
         parquet_files = []
-        csv_files = []
 
-    if parquet_files or csv_files:
+    if parquet_files:
 
         if parquet_files:
             st.caption("GeoParquet outputs (recommended)")
@@ -1699,17 +1705,7 @@ with col_status:
                     key=f"dl_csv_{str(rel).replace('/', '_')}"
                 )
 
-        if csv_files:
-            st.caption("Legacy CSV outputs")
-        for file_path in csv_files:
-            rel = file_path.relative_to(RUNS_DIR)
-            st.download_button(
-                label=f"📥 Download {rel}",
-                data=file_path.read_bytes(),
-                file_name=file_path.name,
-                mime="text/csv",
-                key=f"dl_{str(rel).replace('/', '_')}"
-            )
+
     else:
         st.info("Ready for input.")
 
@@ -1751,9 +1747,8 @@ with col_status:
 
         _partial_root = results_dir(results_run_id) / "partial_checkout"
         parquet_checkout_files = sorted(_partial_root.rglob("*.parquet")) if _partial_root.exists() else []
-        csv_checkout_files = sorted(_partial_root.rglob("*.csv")) if _partial_root.exists() else []
 
-        if parquet_checkout_files or csv_checkout_files:
+        if parquet_checkout_files:
             if parquet_checkout_files:
                 st.caption("GeoParquet partial files")
             for merged_file in parquet_checkout_files:
@@ -1777,15 +1772,6 @@ with col_status:
                         key=f"dl_partial_csv_ng_{str(_prel).replace('/', '_')}"
                     )
 
-            if csv_checkout_files:
-                st.caption("Legacy CSV partial files")
-            for merged_file in csv_checkout_files:
-                st.download_button(
-                    label=f"📥 Partial {merged_file.relative_to(_partial_root)}",
-                    data=merged_file.read_bytes(),
-                    file_name=merged_file.name,
-                    mime="text/csv",
-                    key=f"dl_partial_csv_{str(merged_file.relative_to(_partial_root)).replace('/', '_')}"
-                )
+
         else:
             st.info("No merged partial checkout files yet. Click refresh once some chunks are completed.")

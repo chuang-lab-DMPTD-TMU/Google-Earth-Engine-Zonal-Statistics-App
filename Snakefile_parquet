@@ -123,6 +123,7 @@ rule extract_geojson_chunk:
         ee_collection = lambda wildcards: PRODUCTS[wildcards.prod]["ee_collection"],
         scale = lambda wildcards: PRODUCTS[wildcards.prod]["scale"],
         cadence = lambda wildcards: PRODUCTS[wildcards.prod].get("cadence", "monthly"),
+        categorical = lambda wildcards: PRODUCTS[wildcards.prod].get("categorical", False),
         start_date = lambda wildcards: (
             f"{wildcards.time_chunk}-01-01"                          # Annual: YYYY
             if len(wildcards.time_chunk) == 4
