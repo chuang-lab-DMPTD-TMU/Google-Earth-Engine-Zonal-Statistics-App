@@ -6,9 +6,14 @@ echo ""
 echo " Stopping GEE Web App (React + FastAPI)..."
 echo ""
 
-docker compose --profile prod down
+if docker compose --profile prod down; then
+    echo ""
+    echo " All services stopped."
+else
+    echo ""
+    echo " WARNING: Some containers may still be running."
+    echo " Run: docker compose --profile prod ps"
+fi
 
-echo ""
-echo " All services stopped."
 echo ""
 read -rp "Press Enter to close..."

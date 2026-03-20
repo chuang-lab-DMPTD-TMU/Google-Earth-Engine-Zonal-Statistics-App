@@ -23,7 +23,7 @@ A small file (ending in `.json`) that gives the app access to Google Earth Engin
 2. Launch the app:
    - **Mac:** double-click `Start.command`
    - **Windows:** double-click `Start.bat`
-   - **Linux:** open a terminal in the folder and run `./quickstart.sh`
+   - **Linux:** open a terminal in the folder and run `./quickstart-react.sh`
 
    > **Mac — first launch only:** if you see "cannot be opened because the developer cannot be verified", right-click `Start.command`, choose **Open**, then click **Open**. You won't be asked again.
 
@@ -78,7 +78,7 @@ The first time you open the app it will ask you to upload this file. After that 
 2. 啟動應用程式：
    - **Mac：**  `Start.command`點兩下
    - **Windows：**  `Start.bat`點兩下
-   - **Linux：** 在資料夾中開啟終端機並執行 `./quickstart.sh`
+   - **Linux：** 在資料夾中開啟終端機並執行 `./quickstart-react.sh`
 
    > **Mac — 首次啟動：** 若出現「無法開啟，因為無法驗證開發者」的提示，請右鍵點擊 `Start.command`，選擇**開啟**，然後點擊**開啟**。之後不會再出現此提示。
 

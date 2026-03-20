@@ -93,8 +93,8 @@ echo  Waiting for frontend...
 powershell -NoProfile -Command ^
   "$port='%FRONTEND_PORT%';" ^
   "for($i=0;$i-lt 60;$i++){" ^
-  "  if(Test-NetConnection -ComputerName '127.0.0.1' -Port $port -InformationLevel Quiet){exit 0};" ^
-  "  Start-Sleep 1 }; exit 1"
+  "  try { $r=(Invoke-WebRequest -Uri \"http://localhost:$port/\" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop).StatusCode;" ^
+  "    if($r -lt 500){exit 0} } catch {}; Start-Sleep 1 }; exit 1"
 if errorlevel 1 (
     echo.
     echo  Frontend did not respond after 60 s.

@@ -1,339 +1,219 @@
-# GEE Batch Processor — User Manual
+# GEE Web App — User Manual
 
-A practical guide to using the app, with setup and troubleshooting for when things go wrong.
+A step-by-step guide to downloading satellite data from Google Earth Engine using the browser interface.
 
 ---
 
 ## Table of Contents
 
-1. [Using the downloader (Streamlit UI)](#1-using-the-downloader-streamlit-ui)
-   - [Section 0 — Run Session (sidebar)](#section-0--run-session-sidebar)
-   - [Section 1 — Data Parameters (sidebar)](#section-1--data-parameters-sidebar)
-   - [Section 2 — Area of Interest](#section-2--area-of-interest)
-   - [Section 3 — Results](#section-3--results)
-   - [Section 4 — Partial Checkout](#section-4--partial-checkout)
+1. [Overview](#1-overview)
 2. [Prerequisites](#2-prerequisites)
-3. [Getting the code](#3-getting-the-code)
-4. [GEE credentials](#4-gee-credentials)
-5. [Building and launching Docker](#5-building-and-launching-docker)
-6. [Stopping, resuming, and housekeeping](#6-stopping-resuming-and-housekeeping)
-7. [Troubleshooting](#7-troubleshooting)
-8. [For developers](#8-for-developers)
+3. [Starting and stopping the app](#3-starting-and-stopping-the-app)
+4. [Uploading your GEE key](#4-uploading-your-gee-key)
+5. [Working with runs](#5-working-with-runs)
+6. [Uploading an Area of Interest](#6-uploading-an-area-of-interest)
+7. [Configuring datasets](#7-configuring-datasets)
+8. [Running the analysis](#8-running-the-analysis)
+9. [Monitoring progress](#9-monitoring-progress)
+10. [Downloading results](#10-downloading-results)
+11. [Partial checkout (mid-run downloads)](#11-partial-checkout-mid-run-downloads)
+12. [Stopping, retrying, and resuming runs](#12-stopping-retrying-and-resuming-runs)
+13. [Troubleshooting](#13-troubleshooting)
 
 ---
 
-## 1. Using the downloader (Streamlit UI)
+## 1. Overview
 
-The UI is divided into numbered sections. Work through them top-to-bottom for a new run.
+GEE Web App lets you extract satellite data from Google Earth Engine for any geographic area you choose. You define:
 
----
+- **Where** — by uploading a boundary file (your Area of Interest)
+- **What** — by selecting one or more datasets and their variables
+- **When** — by setting a date range per dataset
 
-### Section 0 — Run Session (sidebar)
-
-Located at the top of the left sidebar.
-
-| Field | Purpose |
-|-------|---------|
-| **RUN ID** (text box) | Leave blank to auto-generate a 6-character ID for a new run. Type an existing ID to resume or monitor a previous run. |
-
-When you type an existing RUN ID, a status badge (`running`, `completed`, `failed`) appears below the input. If the run is still active, a **Stop This RUN ID** button is also shown.
-
-The **Local RUN registry** expander beneath shows a table of every run ever started, with status and timestamps. Click any row in the **Inspect a stored RUN** selector to see its full configuration.
-
----
-
-### Section 1 — Data Parameters (sidebar)
-
-Each dataset is collapsed inside its own expander. Expand one or more to configure them.
-
-**Available datasets:**
-
-| Dataset | What it measures | Native resolution | Date range |
-|---------|-----------------|-------------------|------------|
-| **CHIRPS** | Precipitation | 0.05° (~5.6 km) | 1981-01 → present |
-| **ERA5_LAND** | Temperature, precipitation, evaporation (11 variables) | ~9 km | 1950-01 → present |
-| **MODIS_LST** | Land Surface Temperature (day + night) | 1 km | 2000-02 → present |
-| **MODIS_NDVI_EVI** | Vegetation indices | 250 m | 2000-02 → present |
-| **WorldCover_v100** | Land cover classification 2020 | 10 m | 2020 only |
-| **WorldCover_v200** | Land cover classification 2021 | 10 m | 2021 only |
-| **MODIS_LULC** | Land cover types | 500 m | 2001–2023 |
-
-**For each dataset you enable:**
-
-1. Tick **Enable `<dataset>`**.
-2. **Select Bands** — choose which variables to extract (all are ticked by default).
-3. **Select Statistics (Reducers)** — `mean`, `sum`, `min`, `max`, `median`. The default is pre-filled per dataset.
-4. **Select date range** — Products with composite cadence will automatically extract data within the selected range.
-
-You can enable multiple datasets in one run; they are processed in parallel subject to GEE rate limits.
-
----
-
-### Section 2 — Area of Interest
-
-This is the left main column, labelled **2. Area of Interest**.
-
-#### Uploading your geometry
-
-Click **Browse files** and upload one of:
-
-| Format | Notes |
-|--------|-------|
-| **ZIP shapefile** | Must contain `.shp`, `.shx`, `.dbf`, `.prj` together in one ZIP |
-| **GeoJSON** | Single `.geojson` file |
-| **GeoParquet** | `.parquet` or `.geoparquet` with a geometry column |
-
-The app validates the geometry and stores it inside the run directory at `data/runs/<run_id>/inputs/`, keeping all inputs and outputs together in one place.
-
-#### New run vs. resume
-
-- Leave **RUN ID** blank in Section 0 to start fresh.
-- Enter an existing RUN ID to resume — the geometry is already stored with that run, so no re-upload is needed.
-
-#### Running the pipeline
-
-Once at least one dataset is configured and the AOI is uploaded, the **Run Analysis** button becomes active. Click it to:
-
-1. Freeze the run configuration.
-2. Auto-generate or reuse the RUN ID.
-3. Show an **Execution Plan** with job counts.
-4. Launch the extraction pipeline in the background.
-
-Progress is shown below as chunk and final-file counts update. You can safely navigate away and come back — the pipeline runs in the background inside the container.
-
----
-
-### Section 3 — Results
-
-Located in the right main column, labelled **3. Results**.
-
-Once a run has completed, result files appear in the UI with two options:
-
-- **GeoParquet (recommended)** — written to `data/runs/<run_id>/results/` automatically when the pipeline finishes. The file is already on your computer; the UI button is just a convenience shortcut.
-- **CSV** — clicking the CSV button converts the GeoParquet to a flat table (geometry removed) and saves it next to the parquet as `<product>_<start>_to_<end>.csv`. Subsequent clicks read from that saved file. Like the parquet, it is directly accessible in `data/runs/<run_id>/results/`.
-
-File naming convention:
-
-```
-<product>_<start_date>_to_<end_date>.parquet
-# e.g. CHIRPS_1986-01-01_to_2026-02-28.parquet
-```
-
----
-
-### Section 4 — Partial Checkout
-
-Appears when a Results RUN ID is entered. Useful when a long run is still in progress and you need intermediate results.
-
-1. Click **Prepare/Refresh Partial Checkout Files**.
-2. The app merges all completed chunk files (even if the full pipeline hasn't finished) into a single GeoParquet per product.
-3. Download buttons appear for the merged partial files.
-
-Re-click the button at any time to include newer completed chunks.
+The app sends those requests to Google Earth Engine in the background and produces downloadable files (GeoParquet and CSV) when the extraction is done. Runs can take anywhere from a few minutes to several hours depending on area size and date range.
 
 ---
 
 ## 2. Prerequisites
 
-| Requirement | Minimum version | Notes |
-|-------------|-----------------|-------|
-| Docker Engine | 24+ | Includes `docker compose` plugin |
-| Docker Compose | v2 | Called as `docker compose` (no hyphen) |
-| Disk space | ~5 GB free | Per run; varies with AOI size and date range |
-| GEE service account | — | JSON key file; see §4 |
+You need two things before you start:
 
-On **macOS/Windows** use Docker Desktop. On **Linux** install Docker Engine and the Compose plugin from the official packages.
+**Docker Desktop** — the only software to install. Download it from [docker.com/products/docker-desktop](https://www.docker.com/products/docker-desktop) and run the installer. Make sure it is open and running before launching the app.
 
-Verify your install:
+**A Google Earth Engine service account key** — a `.json` file that gives the app access to Google Earth Engine. See [Getting a key](README.md#getting-a-key) in the README if you do not have one yet.
 
-```bash
-docker --version        # Docker version 24.x or later
-docker compose version  # Docker Compose version v2.x or later
+---
+
+## 3. Starting and stopping the app
+
+**Start:**
+
+| Platform | Action |
+|----------|--------|
+| macOS | Double-click `Start.command` |
+| Windows | Double-click `Start.bat` |
+| Linux | Run `./quickstart-react.sh` in a terminal |
+
+> **macOS — first launch only:** if you see "cannot be opened because the developer cannot be verified", right-click `Start.command`, choose **Open**, then click **Open**. You will not be asked again.
+
+The first launch downloads and builds the app (3–10 minutes). Every launch after that is much faster. When the app is ready, your browser opens automatically.
+
+**Stop:**
+
+| Platform | Action |
+|----------|--------|
+| macOS | Double-click `Stop.command` |
+| Windows | Double-click `Stop.bat` |
+| Linux | Run `./stop.sh` in a terminal |
+
+Closing the browser tab does **not** stop the app. Any extraction that is in progress will keep running in the background until you use the stop file — or until it finishes.
+
+---
+
+## 4. Uploading your GEE key
+
+The first time you open the app you will see an upload prompt instead of the main interface. Drag your `.json` key file onto the upload area, or click it to browse. The app validates the key and shows the service account email when successful.
+
+The key is stored locally and reused every time you restart the app. You will not be asked again unless you replace it.
+
+**To replace the key:** find the **GEE Credentials** section at the top of the left sidebar. It shows the connected account email with a **Replace** button. Click it to upload a different key.
+
+---
+
+## 5. Working with runs
+
+Each extraction is organised into a **run** — a self-contained record that holds your configuration, input geometry, logs, and output files.
+
+### Creating a new run
+
+Click the **+ New** button in the **Run Session** section of the sidebar. The app pre-fills a unique run ID; you can keep it or type your own. Click **Confirm** to create the run.
+
+### Selecting a previous run
+
+Open the **Previous runs** dropdown in the sidebar. Each row shows a run ID, its status (running, completed, failed, stopped), and the datasets it included. Click any row to load that run and see its full state, logs, and results.
+
+### Run ID
+
+The run ID is a short identifier that links all the files for that run together. You can use it to find your output files in `data/runs/<run_id>/results/`.
+
+---
+
+## 6. Uploading an Area of Interest
+
+With a run selected, the main area on the left shows the **Area of Interest** upload zone. Drag your boundary file onto it, or click to browse. Accepted formats:
+
+| Format | File extension |
+|--------|---------------|
+| Shapefile | `.zip` containing `.shp`, `.shx`, `.dbf`, `.prj` |
+| GeoJSON | `.geojson` |
+| GeoParquet | `.parquet` |
+
+After upload the app shows a map preview of your geometry (in green), along with the feature count, coordinate system, and bounding box.
+
+Once you submit a run, the geometry is locked to that run and cannot be changed. If you load a previous run, the geometry is already stored — no re-upload is needed.
+
+---
+
+## 7. Configuring datasets
+
+The **Datasets** section of the sidebar lists all available products. Each one is collapsed by default.
+
+**To enable a dataset:**
+
+1. Tick its checkbox to enable it. This expands the configuration card.
+2. Set the **date range** (start and end date). Valid dates for each dataset are enforced automatically.
+3. Select the **bands** you want to extract. All bands are selected by default — deselect any you do not need.
+4. Select the **statistics** to compute (e.g. mean, min, max, median). The appropriate defaults are pre-filled.
+
+You can enable multiple datasets in one run; they are processed in parallel.
+
+**Available datasets:**
+
+| Dataset | What it measures | Resolution | Date coverage |
+|---------|-----------------|------------|---------------|
+| **CHIRPS** | Precipitation | ~5.6 km | 1981 → present |
+| **ERA5-Land** | Temperature, precipitation, evaporation (11 variables) | ~9 km | 1950 → present |
+| **MODIS LST** | Land surface temperature (day + night) | 1 km | Feb 2000 → present |
+| **MODIS NDVI/EVI** | Vegetation indices | 250 m | Feb 2000 → present |
+| **WorldCover v1.0** | Land cover classification | 10 m | 2020 only |
+| **WorldCover v2.0** | Land cover classification | 10 m | 2021 only |
+| **MODIS LULC** | Land use and land cover types | 500 m | 2001–2023 |
+
+---
+
+## 8. Running the analysis
+
+Once you have uploaded an AOI and configured at least one dataset (with bands and statistics selected), the **Run Analysis** button in the right panel becomes active. Click it to submit.
+
+The app freezes the configuration, logs a start event, and begins extracting data from Google Earth Engine in the background. You can safely close the browser tab — the extraction continues inside the Docker container and your results will be waiting when you come back.
+
+---
+
+## 9. Monitoring progress
+
+While a run is active you can watch its progress in the right panel:
+
+**Progress bar** — shows how many chunks (sub-tasks) have completed out of the total. Large areas and long date ranges are split into many smaller chunks; this bar lets you track how far along the run is. Failed chunks are shown in red.
+
+**Snakemake log** — displayed below the map on the left. This is the live output of the extraction pipeline, colour-coded: green for completed steps, red for errors, yellow for warnings. It updates every few seconds.
+
+**Event log** — at the bottom of the sidebar, showing timestamped messages across all runs. Errors appear in red.
+
+---
+
+## 10. Downloading results
+
+When a run finishes (status: **completed**), the **Download Results** section appears in the right panel. For each dataset product you will see two buttons:
+
+- **GeoParquet** — the full result file with geometry included, ready for use in Python (GeoPandas), QGIS, or similar tools.
+- **CSV** — a flat table version of the same data (geometry removed). Useful for spreadsheet tools.
+
+Both files are also saved directly on your computer at:
+
+```
+data/runs/<run_id>/results/<product>_<start>_to_<end>.parquet
+data/runs/<run_id>/results/<product>_<start>_to_<end>.csv
 ```
 
 ---
 
-## 3. Getting the code
+## 11. Partial checkout (mid-run downloads)
 
-Clone the repository and enter the directory:
+If you need results before a run finishes — for example, the run is still processing later years but you want early results now — use **partial checkout**.
 
-```bash
-git clone https://github.com/<your-org>/gee_web_app.git
-cd gee_web_app
-```
+1. With the run selected, find the **Build Partial Checkout** button in the right panel.
+2. Click it. The app merges all chunks that have completed so far into a single file per product.
+3. Download buttons appear labelled **GeoParquet** and **CSV**, just like for a completed run.
 
-If you received the code as a ZIP archive instead, unzip it and `cd` into the resulting folder. The rest of the steps are identical.
-
-**What you'll see inside the folder:**
-
-```
-gee_web_app/
-├── main.py               ← Streamlit application (UI + pipeline launcher)
-├── Snakefile_parquet     ← Snakemake workflow (GeoParquet pipeline)
-├── scripts/              ← Worker scripts called by Snakemake
-├── config/               ← Key stored here after first-run setup (see §4)
-├── data/                 ← Created automatically; holds all run data
-├── Start.command         ← Launcher for macOS (double-click)
-├── Start.bat             ← Launcher for Windows (double-click)
-├── Stop.command          ← Stop the app on macOS (double-click)
-├── Stop.bat              ← Stop the app on Windows (double-click)
-├── docker-compose.yml
-├── Dockerfile
-└── requirements.txt
-```
+Click **Build Partial Checkout** again at any time to include newer completed chunks.
 
 ---
 
-## 4. GEE credentials
+## 12. Stopping, retrying, and resuming runs
 
-The app connects to Google Earth Engine using a **service account key**. You set this up entirely inside the browser — no manual file copying required.
+### Stopping a running run
 
-**Getting a key from Google Cloud:**
+Click the **Stop Run** button (red) in the right panel while the run is active. The pipeline halts and the run is marked **stopped**.
 
-1. Open the [Google Cloud Console](https://console.cloud.google.com/iam-admin/serviceaccounts) and select your project.
-2. Create (or open) a service account that has the **Earth Engine** role.
-3. Go to **Keys → Add Key → Create new key → JSON** and download the file.
+### Retrying a failed or stopped run
 
-**Uploading the key in the app:**
+If a run shows status **failed** or **stopped**, a **Retry Run** button appears. Clicking it restarts the pipeline from where it left off — completed chunks are not re-extracted.
 
-The first time you open the app, it shows a setup screen instead of the normal UI. Drag-and-drop (or click to browse) the downloaded `.json` file into the upload widget. The app validates it and confirms the service-account email — then loads the full interface automatically.
+### Resuming a run from a previous session
 
-The key is saved to `config/gee-key.json` on the host and reused on every subsequent restart. You will not be prompted again unless you remove it.
-
-**Removing or replacing the key:**
-
-Open the **GEE credentials** expander in the left sidebar and click **Remove / replace key**. The setup screen reappears so you can upload a different key.
-
-> `config/gee-key.json` is listed in `.gitignore` and will not be committed to git.
+Select the run from the **Previous runs** dropdown in the sidebar. The run state, logs, and any available results load automatically. If the run was still in progress when you last closed the app, its status reflects what happened while it ran in the background.
 
 ---
 
-## 5. Building and launching Docker
+## 13. Troubleshooting
 
-**macOS** — double-click `Start.command` in Finder.
-
-**Windows** — double-click `Start.bat`.
-
-**Linux** — run `./quickstart.sh` from a terminal inside the project folder.
-
-All three do the same thing:
-
-1. Check that Docker Desktop is running and show a clear message if it isn't.
-2. Build the image on first launch (downloads base image and installs dependencies — **takes 3–10 minutes the first time**, cached for every launch after).
-3. Start the container, pick the first free port from 8501–8505, wait for the UI to respond, then open it in your browser automatically.
-
-> **macOS — first launch only:** If you see "cannot be opened because the developer cannot be verified", right-click `Start.command` and choose **Open**, then click **Open** in the dialog. You won't be asked again.
-
-**To stop the app** when you are done:
-
-- **macOS:** double-click `Stop.command`
-- **Windows:** double-click `Stop.bat`
-- **Linux:** run `./stop.sh` in a terminal
-
-**To follow live logs:**
-
-```bash
-docker compose logs -f app
-```
-
----
-
-## 6. Stopping, resuming, and housekeeping
-
-### Stopping a running pipeline
-
-- **From the UI:** Enter the RUN ID in Section 0 → click **Stop This RUN ID**.
-- **From the terminal:** `docker compose exec app kill -TERM <snakemake_pid>` (PID shown in the sidebar).
-- **Nuclear option:** `docker compose down` — stops everything; you can restart and resume.
-
-### Resuming a failed or stopped run
-
-1. Enter the RUN ID in the Section 0 sidebar input.
-2. Configure the same products and date range.
-3. Click **Run Analysis** — the stored geometry is reused automatically and the pipeline picks up from where it left off (only missing chunks are re-extracted).
-
-### Unlocking a stale Snakemake lock
-
-If the app crashed mid-run, Snakemake may leave a `.snakemake/locks/` directory inside the run folder. The app automatically attempts an unlock before each new run. If problems persist, run the unlock command for the specific run:
-
-```bash
-docker compose exec app bash -c "cd /app/data/runs/<run_id> && snakemake --unlock --snakefile /app/Snakefile_parquet --directory /app/data/runs/<run_id>"
-```
-
----
-
-## 7. Troubleshooting
-
-| Symptom | Likely cause | Fix |
-|---------|-------------|-----|
-| App doesn't open after double-clicking the launcher | Docker is not running | Start Docker Desktop, then try again |
-| UI never loads (browser stays blank) | Port conflict or image build failed | `docker compose logs -f app` to inspect |
-| "GEE authentication error" | `gee-key.json` missing or wrong path | Confirm file is at `config/gee-key.json` |
-| Pipeline hangs at 0 chunks | GEE rate limit or network issue | Wait 2 min; check `data/runs/<run_id>/logs/snakemake_run.log` |
-| Run shows `failed` immediately | Snakemake lock from a prior crash | Run the unlock command above, then retry |
-| File ownership issues on Linux | UID/GID mismatch | `./quickstart.sh` fixes this automatically by exporting `HOST_UID`/`HOST_GID` |
-
-**Log locations:**
-
-| Log | Path |
-|-----|------|
-| Snakemake run log | `data/runs/<run_id>/logs/snakemake_run.log` |
-| Container stdout | `docker compose logs app` |
-| Run event history | `data/runs/run_state.duckdb` → `run_events` table |
-
----
-
-## 8. For developers
-
-### Directory layout
-
-```
-gee_web_app/
-├── data/              # runtime data (not committed to git)
-│   └── runs/          # all per-run output
-│       ├── <run_id>/
-│       │   ├── inputs/       # uploaded geometry file (shapefile, GeoJSON, or GeoParquet)
-│       │   ├── results/      # final merged .parquet files
-│       │   ├── logs/         # snakemake_run.log and per-job logs
-│       │   └── intermediate/ # chunk working files (GeoJSON → GeoParquet)
-│       └── run_state.duckdb  # run status and event history
-├── config/            # GEE service account key (not committed to git)
-│   └── gee-key.json
-├── scripts/           # worker scripts called by Snakemake
-├── main.py            # Streamlit application (UI + pipeline launcher)
-├── Snakefile_parquet  # Snakemake workflow orchestrator
-├── quickstart.sh      # Linux launcher; picks a free port (8501–8505)
-├── stop.sh            # Linux stop script
-├── Start.command      # macOS launcher (double-click)
-├── Start.bat          # Windows launcher (double-click)
-├── Stop.command       # macOS stop (double-click)
-├── Stop.bat           # Windows stop (double-click)
-├── docker-compose.yml # service definition
-├── Dockerfile         # base image, system deps, pip install
-└── requirements.txt
-```
-
-### Live container logs
-
-```bash
-docker compose logs -f app
-```
-
-### Open a shell inside the container
-
-```bash
-docker compose exec app bash
-```
-
-### Port selection
-
-The launchers try ports 8501–8505 and use the first one that is free. To change the candidate list, edit the `PORTS` array at the top of `quickstart.sh` or `Start.command` / `Start.bat`.
-
-### File ownership on Linux
-
-`quickstart.sh` exports `HOST_UID` and `HOST_GID` before starting the container so that files written inside the container are owned by your host user. If you start the container manually (e.g. `docker compose up -d`), export those variables first:
-
-```bash
-export HOST_UID=$(id -u) HOST_GID=$(id -g)
-docker compose up -d app
-```
+| Symptom | Likely cause | What to do |
+|---------|-------------|------------|
+| Browser does not open after launching | Docker is not running | Open Docker Desktop and wait for it to start, then try again |
+| App opens but shows an upload prompt immediately | No GEE key stored yet | Upload your `.json` service account key |
+| "Authentication error" after uploading key | Key is invalid or the service account lacks Earth Engine access | Check that the service account has the **Earth Engine** role in Google Cloud Console |
+| Run shows **failed** immediately | Configuration or geometry issue | Check the event log for an error message; correct the issue and click **Retry Run** |
+| Progress bar has been stuck for a long time | GEE rate limit or network issue | Wait a few minutes; check the Snakemake log for error lines |
+| Download button does nothing | No result file yet | Ensure the run is completed or use **Build Partial Checkout** for in-progress runs |
+| File ownership errors on Linux | UID/GID mismatch | Always use `./quickstart-react.sh` to start the app rather than starting Docker manually |
+| App stops responding after I close the browser | Expected — the app still runs | Re-open the browser and navigate to the address shown when you started the app |

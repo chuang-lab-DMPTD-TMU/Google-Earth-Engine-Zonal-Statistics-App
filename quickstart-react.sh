@@ -148,8 +148,9 @@ if [[ $frontend_ready -eq 1 ]]; then
   fi
 else
   echo
-  echo "WARNING: Frontend did not respond after 60 s."
+  echo "ERROR: Frontend did not respond after 60 s."
   echo "  docker compose logs -f ${CONTAINER}"
+  exit 1
 fi
 
-echo "Run ./stop.sh (or './stop.sh --react') when you are done."
+echo "Run ./stop.sh (or './stop.sh --all' to also stop dev/legacy containers) when you are done."

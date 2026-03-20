@@ -13,12 +13,20 @@ echo " Stopping GEE Web App (React + FastAPI)..."
 echo ""
 
 if [[ "${1:-}" == "--all" ]]; then
-    docker compose --profile prod --profile dev --profile legacy down
-    echo " All profiles stopped."
+    if docker compose --profile prod --profile dev --profile legacy down; then
+        echo " All profiles stopped."
+    else
+        echo " WARNING: Some containers may still be running."
+        echo " Run: docker compose --profile prod --profile dev --profile legacy ps"
+    fi
 else
-    docker compose --profile prod down
-    echo " React stack stopped."
-    echo " (Pass --all to also stop legacy Streamlit / dev containers.)"
+    if docker compose --profile prod down; then
+        echo " React stack stopped."
+        echo " (Pass --all to also stop legacy Streamlit / dev containers.)"
+    else
+        echo " WARNING: Some containers may still be running."
+        echo " Run: docker compose --profile prod ps"
+    fi
 fi
 
 echo ""
