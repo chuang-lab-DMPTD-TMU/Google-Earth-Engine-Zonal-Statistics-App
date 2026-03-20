@@ -64,12 +64,12 @@ def infer_time_chunks(settings):
     return result
 
 def get_final_targets():
-    """Define final output files: one GeoParquet per product"""
+    """Define final output files: merged GeoParquet + cleanup marker per product."""
     targets = []
     for prod, settings in PRODUCTS.items():
         start, end = settings["start_date"], settings["end_date"]
-        # Final merged GeoParquet file (all bands + geometry)
         targets.append(f"{RESULTS_DIR}/{prod}/{prod}_{start}_to_{end}.parquet")
+        targets.append(f"{RESULTS_DIR}/{prod}/.cleanup_done")
     return targets
 
 def get_previous_chunk_output(wildcards):
@@ -97,6 +97,54 @@ def get_previous_chunk_output(wildcards):
 rule all:
     input:
         get_final_targets()
+
+onsuccess:
+    import yaml, os, json, duckdb
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    run_yaml = f"{APP_DIR}/data/runs/{RUN_ID}/run.yaml"
+    db_path  = f"{APP_DIR}/data/runs/run_state.duckdb"
+    if os.path.exists(run_yaml):
+        with open(run_yaml) as f:
+            meta = yaml.safe_load(f) or {}
+        meta["status"] = "completed"
+        meta["updated_at"] = now
+        meta["last_finished_at"] = now
+        with open(run_yaml, "w") as f:
+            yaml.safe_dump(meta, f, sort_keys=False)
+    if os.path.exists(db_path):
+        try:
+            with duckdb.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    [now, RUN_ID, "status_change", "completed", "Run completed successfully", "{}"]
+                )
+        except Exception:
+            pass
+
+onerror:
+    import yaml, os, json, duckdb
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    run_yaml = f"{APP_DIR}/data/runs/{RUN_ID}/run.yaml"
+    db_path  = f"{APP_DIR}/data/runs/run_state.duckdb"
+    if os.path.exists(run_yaml):
+        with open(run_yaml) as f:
+            meta = yaml.safe_load(f) or {}
+        meta["status"] = "failed"
+        meta["updated_at"] = now
+        meta["last_finished_at"] = now
+        with open(run_yaml, "w") as f:
+            yaml.safe_dump(meta, f, sort_keys=False)
+    if os.path.exists(db_path):
+        try:
+            with duckdb.connect(db_path) as conn:
+                conn.execute(
+                    "INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    [now, RUN_ID, "status_change", "failed", "Run failed", "{}"]
+                )
+        except Exception:
+            pass
 
 rule extract_geojson_chunk:
     """
@@ -180,18 +228,22 @@ rule merge_product_parquet:
     script:
         "scripts/merge_parquet.py"
 
-# Optional: Cleanup intermediate GeoJSON files after conversion
-rule cleanup_geojson:
+rule cleanup_intermediate:
     """
-    Optional cleanup step to remove intermediate GeoJSON files 
-    after successful conversion to GeoParquet.
+    Remove all intermediate GeoJSON and parquet chunk files for a product once
+    the final merged GeoParquet has been written successfully.
+    Runs automatically after merge_product_parquet completes.
     """
     input:
-        parquet = f"{PARQUET_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.parquet"
+        merged = lambda wc: (
+            f"{RESULTS_DIR}/{wc.prod}/"
+            f"{wc.prod}_{PRODUCTS[wc.prod]['start_date']}_to_{PRODUCTS[wc.prod]['end_date']}.parquet"
+        )
     output:
-        marker = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/.cleanup_{{band}}_{{time_chunk}}"
+        marker = f"{RESULTS_DIR}/{{prod}}/.cleanup_done"
     shell:
         """
-        rm -f {GEOJSON_CHUNKS_DIR}/{wildcards.prod}/{wildcards.band}_{wildcards.time_chunk}.geojson
+        rm -rf {GEOJSON_CHUNKS_DIR}/{wildcards.prod}
+        rm -rf {PARQUET_CHUNKS_DIR}/{wildcards.prod}
         touch {output.marker}
         """

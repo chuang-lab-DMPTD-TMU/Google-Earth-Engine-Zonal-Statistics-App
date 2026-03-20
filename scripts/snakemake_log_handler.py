@@ -16,6 +16,8 @@ completion message only carries the numeric jobid, not the wildcards.
 
 import os
 import re
+import sys
+import threading
 import time
 import duckdb
 from datetime import datetime, timezone
@@ -27,6 +29,46 @@ DB_PATH = os.environ.get("GEE_DB_PATH")
 # In-memory map: jobid (int) → {"prod": ..., "band": ..., "time_chunk": ...}
 # Populated on job_info, consumed on completion/error.
 _job_map: dict[int, dict] = {}
+
+# ── per-job log tail threads ──────────────────────────────────────────────────
+# jobid (int) → threading.Event  (set to stop the tail thread)
+_tail_stop: dict[int, threading.Event] = {}
+
+
+def _tail_job_log(log_path: str, stop: threading.Event, prefix: str):
+    """
+    Read new lines from a per-job log file and print them to stdout so they
+    appear in snakemake_run.log (Snakemake redirects this process's stdout there).
+    Polls every 2 s until stop is set, then drains any remaining lines.
+    """
+    try:
+        with open(log_path, "r", errors="replace") as fh:
+            # Seek to end — we only want lines written from now on.
+            fh.seek(0, 2)
+            while not stop.is_set():
+                line = fh.readline()
+                if line:
+                    print(f"[job:{prefix}] {line}", end="", flush=True)
+                else:
+                    stop.wait(2)
+            # Drain any final lines after the job finishes.
+            for line in fh:
+                print(f"[job:{prefix}] {line}", end="", flush=True)
+    except Exception:
+        pass
+
+
+def _start_tail(jobid: int, log_path: str, prefix: str):
+    stop = threading.Event()
+    _tail_stop[jobid] = stop
+    t = threading.Thread(target=_tail_job_log, args=(log_path, stop, prefix), daemon=True)
+    t.start()
+
+
+def _stop_tail(jobid: int):
+    stop = _tail_stop.pop(jobid, None)
+    if stop:
+        stop.set()
 
 
 def _wildcards_to_dict(wildcards) -> dict:
@@ -44,6 +86,25 @@ def _wildcards_to_dict(wildcards) -> dict:
         return dict(wildcards)
     except Exception:
         return {}
+
+
+def _append_run_event(message: str, event_type: str = "info"):
+    """Write a single event to run_events. Silently ignores all errors."""
+    if not RUN_ID or not DB_PATH:
+        return
+    for attempt in range(3):
+        try:
+            with duckdb.connect(DB_PATH) as conn:
+                conn.execute(
+                    """INSERT INTO run_events
+                           (event_time, run_id, event_type, status, message, payload_json)
+                       VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, '{}')""",
+                    [RUN_ID, event_type, event_type, message],
+                )
+            return
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.05 * (attempt + 1))
 
 
 def _upsert_job(prod: str, band: str, chunk: str, status: str,
@@ -99,35 +160,60 @@ def _dispatch(log: dict):
 
     # ── job dispatched ────────────────────────────────────────────────────────
     if level == "job_info":
-        jobid    = log.get("jobid")
-        wc       = _wildcards_to_dict(log.get("wildcards"))
-        prod     = wc.get("prod")
-        band     = wc.get("band")
-        chunk    = wc.get("time_chunk")
+        rule  = log.get("name") or ""
+        jobid = log.get("jobid")
+        wc    = _wildcards_to_dict(log.get("wildcards"))
+        prod  = wc.get("prod")
+
+        if rule == "merge_product_parquet":
+            if prod:
+                _append_run_event(f"Started {prod} merge", event_type="job_start")
+            return
+
+        # Only track the GEE extraction step — convert_to_parquet shares the same
+        # (prod, band, chunk) key and would regress "done" back to "running".
+        if rule not in ("", "extract_geojson_chunk"):
+            return
+
+        band      = wc.get("band")
+        chunk     = wc.get("time_chunk")
         log_files = log.get("log") or []
-        log_path = log_files[0] if log_files else None
+        log_path  = log_files[0] if log_files else None
 
         if jobid is not None and prod and band and chunk:
-            _job_map[int(jobid)] = {"prod": prod, "band": band, "chunk": chunk}
-            _upsert_job(prod, band, chunk, "running",
-                        jobid=int(jobid), log_path=log_path)
+            jid = int(jobid)
+            _job_map[jid] = {"prod": prod, "band": band, "chunk": chunk}
+            _upsert_job(prod, band, chunk, "running", jobid=jid, log_path=log_path)
+            if log_path:
+                # Wait briefly for the worker to create the log file before tailing.
+                threading.Thread(
+                    target=lambda: (time.sleep(1), _start_tail(jid, log_path, f"{band}/{chunk}")),
+                    daemon=True,
+                ).start()
 
     # ── job failed ────────────────────────────────────────────────────────────
     elif level == "job_error":
-        jobid    = log.get("jobid")
-        wc       = _wildcards_to_dict(log.get("wildcards"))
-        prod     = wc.get("prod")
-        band     = wc.get("band")
-        chunk    = wc.get("time_chunk")
+        rule  = log.get("name") or ""
+        jobid = log.get("jobid")
+        wc    = _wildcards_to_dict(log.get("wildcards"))
+        prod  = wc.get("prod")
+        band  = wc.get("band")
+        chunk = wc.get("time_chunk")
         log_files = log.get("log") or []
-        log_path = log_files[0] if log_files else None
+        log_path  = log_files[0] if log_files else None
 
         exc = log.get("exception")
         error_str = str(exc) if exc else "job failed"
-        # Truncate very long exception strings
         if len(error_str) > 500:
             error_str = error_str[:500] + "…"
 
+        if rule == "merge_product_parquet":
+            if prod:
+                _append_run_event(f"Failed {prod} merge: {error_str}", event_type="job_error")
+            return
+
+        if jobid is not None:
+            _stop_tail(int(jobid))
         if prod and band and chunk:
             _upsert_job(prod, band, chunk, "failed",
                         jobid=int(jobid) if jobid is not None else None,
@@ -144,6 +230,7 @@ def _dispatch(log: dict):
         match = re.search(r"Finished job\s+(\d+)", msg)
         if match:
             jobid = int(match.group(1))
+            _stop_tail(jobid)
             wc_cached = _job_map.get(jobid, {})
             if wc_cached:
                 _upsert_job(wc_cached["prod"], wc_cached["band"], wc_cached["chunk"],

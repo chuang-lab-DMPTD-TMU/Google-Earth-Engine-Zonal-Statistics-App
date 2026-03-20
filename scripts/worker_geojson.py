@@ -14,6 +14,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 import sys
+import threading
 import traceback
 
 # Prefer Snakemake job log if configured
@@ -125,6 +126,35 @@ def log_progress(message):
         f.write(f"[{datetime.now().isoformat()}] {message}\n")
         f.flush()
 
+
+def _blocking_getinfo(ee_obj, interval=30):
+    """
+    Call ee_obj.getInfo() while emitting a heartbeat log every `interval` seconds.
+    Gives visible feedback when GEE server-side computation is slow (e.g. high-res
+    frequencyHistogram) and no per-page progress is possible.
+    """
+    result_box = [None]
+    exc_box    = [None]
+
+    def _run():
+        try:
+            result_box[0] = ee_obj.getInfo()
+        except Exception as e:
+            exc_box[0] = e
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    elapsed = 0
+    while t.is_alive():
+        t.join(timeout=interval)
+        if t.is_alive():
+            elapsed += interval
+            log_progress(f"Still computing on GEE server... ({elapsed}s elapsed)")
+
+    if exc_box[0] is not None:
+        raise exc_box[0]
+    return result_box[0]
+
 def build_reducer(stat_name):
     """Return the EE reducer for a given stat name."""
     return {
@@ -202,14 +232,22 @@ def export_to_geojson(image, regions, scale, out_geojson, max_retries=5, prop_re
     # Export to GeoJSON with retries
     for attempt in range(max_retries):
         try:
-            # Paginate getInfo() to handle collections with >5000 features
+            # Paginate getInfo() to handle collections with >5000 features.
+            # stats.size().getInfo() forces GEE to fully evaluate the computation
+            # graph on the server before returning. For high-resolution categorical
+            # products (e.g. frequencyHistogram at 10m) this can take several minutes
+            # with no per-page progress possible — _blocking_getinfo emits a heartbeat.
             PAGE_SIZE = 5000
-            total = stats.size().getInfo()
+            log_progress("Evaluating collection on GEE server — heartbeat every 30s until done...")
+            total = _blocking_getinfo(stats.size())
             log_progress(f"Collection has {total} features, fetching in pages of {PAGE_SIZE}")
             features = []
             for offset in range(0, total, PAGE_SIZE):
-                page = stats.toList(PAGE_SIZE, offset).getInfo()
+                page = _blocking_getinfo(stats.toList(PAGE_SIZE, offset))
                 features.extend(page)
+                fetched = min(offset + PAGE_SIZE, total)
+                pct = int(fetched / total * 100) if total else 100
+                log_progress(f"Fetched {fetched}/{total} features ({pct}%)")
 
             # Rename reducer output properties to expected {band}_{stat} convention.
             # GEE reduceRegions names output properties after the reducer (e.g. 'mean'),

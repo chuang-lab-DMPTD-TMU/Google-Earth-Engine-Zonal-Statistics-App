@@ -1,10 +1,60 @@
 services:
+
+  # ── FastAPI backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: gee_backend
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/config/gee-key.json
+      - HOME=/tmp
+    restart: unless-stopped
+
+  # ── React frontend (dev) ─────────────────────────────────────────────────────
+  frontend-dev:
+    image: node:20-alpine
+    container_name: gee_frontend_dev
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE=/api
+    command: ["sh", "-c", "npm install && npm run dev"]
+    depends_on:
+      - backend
+    profiles:
+      - dev
+
+  # ── React frontend (production build served by nginx) ─────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    container_name: gee_frontend
+    ports:
+      - "${APP_PORT:-3000}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    profiles:
+      - prod
+
+  # ── Legacy Streamlit app (kept during migration) ─────────────────────────────
   app:
     build: .
     container_name: gee_manager
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     ports:
-      - "${APP_PORT:-8501}:${APP_PORT:-8501}"
+      - "${STREAMLIT_PORT:-8501}:${STREAMLIT_PORT:-8501}"
     working_dir: /app
     volumes:
       - .:/app
@@ -12,4 +62,12 @@ services:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/config/gee-key.json
       - HOME=/tmp
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-    command: ["streamlit", "run", "main.py", "--server.port=${APP_PORT:-8501}", "--server.address=0.0.0.0", "--server.fileWatcherType=watchdog"]
+    command:
+      - "streamlit"
+      - "run"
+      - "main.py"
+      - "--server.port=${STREAMLIT_PORT:-8501}"
+      - "--server.address=0.0.0.0"
+      - "--server.fileWatcherType=watchdog"
+    profiles:
+      - legacy

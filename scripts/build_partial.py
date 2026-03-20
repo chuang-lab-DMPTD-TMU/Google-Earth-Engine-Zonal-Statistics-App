@@ -9,8 +9,24 @@ Usage:
 """
 import sys
 import re
+import json
 import duckdb
 from pathlib import Path
+
+
+def _log_event(runs_dir: Path, run_id: str, message: str):
+    db_path = runs_dir / "run_state.duckdb"
+    if not db_path.exists():
+        return
+    try:
+        with duckdb.connect(str(db_path)) as conn:
+            conn.execute(
+                """INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json)
+                   VALUES (CURRENT_TIMESTAMP, ?, 'info', 'info', ?, ?)""",
+                [run_id, message, json.dumps({})],
+            )
+    except Exception:
+        pass
 
 
 def sql_quote_ident(identifier: str) -> str:
@@ -138,6 +154,7 @@ def build_partial_checkout_files_parquet(run_id: str, runs_dir: Path):
         output_dir.mkdir(parents=True, exist_ok=True)
         if merge_parquet_chunks_to_output(band_chunk_files, output_file):
             merged_files.append(output_file)
+            _log_event(runs_dir, run_id, f"Build partial output to: {output_file.name}")
 
     return sorted(merged_files)
 
