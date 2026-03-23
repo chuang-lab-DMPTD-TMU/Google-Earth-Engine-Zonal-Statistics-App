@@ -1,4 +1,4 @@
-[project]
+[workspace]
 name = "gee-web-app"
 version = "0.1.0"
 description = "GEE zonal statistics web app"
@@ -21,7 +21,7 @@ nodejs = "20.*"
 earthengine-api = "==1.5.2"
 geemap = "==0.32.0"
 pycrs = "==1.0.2"
-folium = "==0.19.4"
+folium = ">=0.19.4"
 numpy = ">=2.0"
 pandas = ">=2.0"
 fastapi = ">=0.115"
@@ -34,19 +34,29 @@ pulp = "==2.7.0"
 # ── Tasks ─────────────────────────────────────────────────────────────────────
 [tasks]
 
-# Install and build the React frontend into frontend/dist
-build-frontend = "npm --prefix frontend install && npm --prefix frontend run build"
+# Run manually only when you need a hard reset (e.g. switching Node versions,
+# corrupted node_modules). Never call this from the normal build chain.
+[tasks.npm-clean]
+cmd = "powershell -NoProfile -Command \"Remove-Item -Recurse -Force -ErrorAction SilentlyContinue node_modules\""
+cwd = "frontend"
 
-# Production: build frontend then serve everything from one uvicorn process
+[tasks.npm-install]
+cmd = "npm install"
+cwd = "frontend"
+
+[tasks.build-frontend]
+cmd = "npm run build"
+cwd = "frontend"
+depends-on = ["npm-install"]
+
 [tasks.start]
 cmd = "uvicorn backend.app:app --host 0.0.0.0 --port 8000"
 depends-on = ["build-frontend"]
 env = { GOOGLE_APPLICATION_CREDENTIALS = "config/gee-key.json" }
 
-# Development: backend with auto-reload (run alongside `pixi run dev-frontend`)
 [tasks.dev-backend]
 cmd = "uvicorn backend.app:app --reload --port 8000"
 env = { GOOGLE_APPLICATION_CREDENTIALS = "config/gee-key.json" }
 
-# Development: Vite dev server with HMR
-dev-frontend = "npm --prefix frontend run dev"
+[tasks.dev-frontend]
+cmd = "npm --prefix frontend run dev"

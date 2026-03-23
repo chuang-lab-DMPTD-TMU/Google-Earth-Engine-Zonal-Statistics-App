@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Start-pixi.command — macOS launcher for GEE Web App (Pixi, no Docker required)
-# Double-click in Finder or run from Terminal.
+# start-pixi.sh — Linux launcher for GEE Web App (Pixi, no Docker required)
+set -euo pipefail
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -11,25 +12,34 @@ echo ""
 
 # --- Check pixi ---
 if ! command -v pixi &>/dev/null; then
-    echo "-----------------------------------------------------"
     echo " Pixi not found. Install it with:"
     echo "   curl -fsSL https://pixi.sh/install.sh | sh"
     echo " Then open a new terminal and try again."
-    echo "-----------------------------------------------------"
-    read -rp "Press Enter to close..."
+    echo ""
     exit 1
+fi
+
+# --- Check for conflicting Docker containers ---
+if docker info &>/dev/null 2>&1; then
+    RUNNING=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -E '^(gee_backend|gee_frontend|gee_frontend_dev)$' || true)
+    if [[ -n "$RUNNING" ]]; then
+        echo " ERROR: Docker containers for this app are already running:"
+        echo "   $(echo "$RUNNING" | tr '\n' ' ')"
+        echo " Stop them first with: ./stop.sh"
+        echo ""
+        exit 1
+    fi
 fi
 
 # --- Find a free port (8000-8003) ---
 PORT=""
 for p in 8000 8001 8002 8003; do
-    if ! nc -z localhost "$p" 2>/dev/null; then
+    if ! ss -ltn 2>/dev/null | grep -q ":${p} "; then
         PORT="$p"; break
     fi
 done
 if [[ -z "$PORT" ]]; then
     echo " No free port (tried 8000-8003). Free a port and try again."
-    read -rp "Press Enter to close..."
     exit 1
 fi
 
@@ -45,7 +55,7 @@ echo ""
 
 # --- Build frontend ---
 echo " Building frontend..."
-pixi run build-frontend || { echo " Frontend build failed."; read -rp "Press Enter..."; exit 1; }
+pixi run build-frontend
 
 # --- Start backend in background, save PID and port ---
 echo " Starting backend..."
@@ -67,11 +77,7 @@ echo ""
 
 if [[ $ready -eq 0 ]]; then
     echo ""
-    echo "-----------------------------------------------------"
-    echo " ERROR: App did not respond after 60 s."
-    echo " Check pixi.log for details."
-    echo "-----------------------------------------------------"
-    read -rp "Press Enter to close..."
+    echo " ERROR: App did not respond after 60 s. Check pixi.log for details."
     exit 1
 fi
 
@@ -82,6 +88,6 @@ echo "  http://localhost:${PORT}"
 echo " =========================================="
 echo ""
 
-open "http://localhost:${PORT}"
-echo " Run Stop-pixi.command when you are done."
+xdg-open "http://localhost:${PORT}" 2>/dev/null || true
+echo " Run ./stop-pixi.sh when you are done."
 echo ""

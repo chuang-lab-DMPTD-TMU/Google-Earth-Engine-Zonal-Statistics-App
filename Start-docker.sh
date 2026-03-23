@@ -72,6 +72,20 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
+# ── Pixi conflict check ───────────────────────────────────────────────────────
+
+if [ -f ".pixi.pid" ]; then
+    PIXI_PID=$(cat .pixi.pid)
+    if kill -0 "$PIXI_PID" 2>/dev/null; then
+        PIXI_PORT=$(cat .pixi.port 2>/dev/null || echo "unknown")
+        echo "ERROR: A pixi-managed backend is already running (PID $PIXI_PID, port $PIXI_PORT)."
+        echo "Stop it first with: ./stop-pixi.sh"
+        exit 1
+    else
+        rm -f .pixi.pid .pixi.port
+    fi
+fi
+
 # ── Build & launch ────────────────────────────────────────────────────────────
 
 echo "Building backend image…"

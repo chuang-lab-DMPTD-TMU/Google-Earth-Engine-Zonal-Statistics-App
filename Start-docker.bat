@@ -17,6 +17,22 @@ if errorlevel 1 (
     exit /b 1
 )
 
+:: --- Check for conflicting Pixi process ---
+if exist ".pixi.port" (
+    set /p PIXI_PORT=<.pixi.port
+    netstat -an 2>nul | findstr /C:":%PIXI_PORT% " | findstr "LISTENING" >nul 2>&1
+    if not errorlevel 1 (
+        echo  ERROR: A Pixi-managed backend appears to be running on port %PIXI_PORT%.
+        echo  Stop it first with: Stop-pixi.bat
+        echo.
+        pause
+        exit /b 1
+    ) else (
+        del /f /q .pixi.port 2>nul
+        del /f /q .pixi.pid 2>nul
+    )
+)
+
 :: --- Find a free port for the backend (8000-8003) ---
 set BACKEND_PORT=
 for %%p in (8000 8001 8002 8003) do (
