@@ -40,16 +40,17 @@ You need **one** of the following runtime options, plus a GEE key:
 
 ### Option A — Docker
 
+Best for: complete environment isolation. Docker runs everything in containers so nothing is installed on your machine beyond Docker itself.
+
 Install [Docker Desktop](https://www.docker.com/products/docker-desktop) and make sure it is open and running before launching the app. No other software is needed.
 
-### Option B — Pixi (no Docker required)
+### Option B — Pixi
 
-Pixi is a lightweight package manager that installs the app's dependencies directly on your machine. Install it once with a single command:
+Best for: environments where Docker is blocked or unavailable (e.g. managed corporate machines, university networks, or anywhere Docker Desktop cannot be installed).
 
-- **Mac / Linux:** `curl -fsSL https://pixi.sh/install.sh | sh`
-- **Windows:** `iwr -useb https://pixi.sh/install.ps1 | iex` (run in PowerShell)
+Pixi is a lightweight package manager that installs the app's dependencies directly on your machine without containers.
 
-Close and reopen your terminal after installing. You only need to do this once.
+**Pixi is installed automatically if not already present.** On both Windows and Linux, if Pixi is not found the start script will detect this and prompt you to install it before continuing. No manual steps needed.
 
 ### GEE service account key
 
@@ -65,19 +66,15 @@ A `.json` file that gives the app access to Google Earth Engine. See [Getting a 
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Start.command` |
-| Windows | Double-click `Start.bat` |
-| Linux | Run `./quickstart-react.sh` in a terminal |
+| Windows | Double-click `Start-docker.bat` |
+| Linux | Run `./Start-docker.sh` in a terminal |
 
 **Pixi option:**
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Start-pixi.command` |
 | Windows | Double-click `Start-pixi.bat` |
-| Linux | Run `./start-pixi.sh` in a terminal |
-
-> **macOS — first launch only (both options):** if you see "cannot be opened because the developer cannot be verified", right-click the file, choose **Open**, then click **Open**. You will not be asked again.
+| Linux | Run `./Start-pixi.sh` in a terminal |
 
 The first launch downloads and installs all dependencies (3–10 minutes). Every launch after that is much faster. When the app is ready, your browser opens automatically.
 
@@ -87,17 +84,15 @@ The first launch downloads and installs all dependencies (3–10 minutes). Every
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Stop.command` |
-| Windows | Double-click `Stop.bat` |
-| Linux | Run `./stop.sh` in a terminal |
+| Windows | Double-click `Stop-docker.bat` |
+| Linux | Run `./Stop-docker.sh` in a terminal |
 
 **Pixi option:**
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Stop-pixi.command` |
 | Windows | Double-click `Stop-pixi.bat` |
-| Linux | Run `./stop-pixi.sh` in a terminal |
+| Linux | Run `./Stop-pixi.sh` in a terminal |
 
 Closing the browser tab does **not** stop the app. Any extraction that is in progress will keep running in the background until you use the stop file — or until it finishes.
 
@@ -243,12 +238,12 @@ Select the run from the **Previous runs** dropdown in the sidebar. The run state
 | Symptom | Likely cause | What to do |
 |---------|-------------|------------|
 | Browser does not open after launching (Docker) | Docker is not running | Open Docker Desktop and wait for it to start, then try again |
-| Browser does not open after launching (Pixi) | Pixi not installed or not on PATH | Install Pixi per the instructions in [Prerequisites](#2-prerequisites), open a new terminal, and try again |
-| `pixi` command not found after installing | Terminal not restarted after install | Close and reopen your terminal, then try again |
+| Browser does not open after launching (Pixi) | Pixi not installed or not on PATH | Re-run the start script and accept the install prompt; if it still fails, open a new terminal and try again |
+| `pixi` command not found after the install prompt | PATH not updated in current session | Close and reopen your terminal, then run the start script again |
 | App opens but shows an upload prompt immediately | No GEE key stored yet | Upload your `.json` service account key |
 | "Authentication error" after uploading key | Key is invalid or the service account lacks Earth Engine access | Check that the service account has the **Earth Engine** role in Google Cloud Console |
 | Run shows **failed** immediately | Configuration or geometry issue | Check the event log for an error message; correct the issue and click **Retry Run** |
 | Progress bar has been stuck for a long time | GEE rate limit or network issue | Wait a few minutes; check the Snakemake log for error lines |
 | Download button does nothing | No result file yet | Ensure the run is completed or use **Build Partial Checkout** for in-progress runs |
-| File ownership errors on Linux (Docker) | UID/GID mismatch | Always use `./quickstart-react.sh` to start the app rather than starting Docker manually |
+| File ownership errors on Linux (Docker) | UID/GID mismatch | Always use `./Start-docker.sh` to start the app rather than starting Docker manually |
 | App stops responding after I close the browser | Expected — the app still runs | Re-open the browser and navigate to the address shown when you started the app |

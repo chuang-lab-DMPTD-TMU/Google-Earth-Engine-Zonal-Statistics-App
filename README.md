@@ -12,14 +12,12 @@ You need two things:
 
 | Option | Best for | Requirement |
 |--------|----------|-------------|
-| **Docker** | Most users | Install [Docker Desktop](https://www.docker.com/products/docker-desktop) |
-| **Pixi** | Users without Docker, or if Docker is not allowed | Run one install command (see below) |
+| **Docker** | Complete environment isolation — nothing is installed on your machine | Install [Docker Desktop](https://www.docker.com/products/docker-desktop) |
+| **Pixi** | Environments where Docker is blocked or unavailable (e.g. managed corporate machines) | Installed automatically if missing (see below) |
 
-Both options give the same app in your browser. Docker runs everything in containers; Pixi runs everything directly on your machine without containers.
+Both options give the same app in your browser. Docker runs everything in isolated containers so nothing touches your system; Pixi installs the app's dependencies directly on your machine without containers.
 
-> **Installing Pixi** (if you choose this option):
-> - **Mac / Linux:** open a terminal and run `curl -fsSL https://pixi.sh/install.sh | sh`, then close and reopen the terminal.
-> - **Windows:** open PowerShell and run `iwr -useb https://pixi.sh/install.ps1 | iex`, then close and reopen the terminal.
+> **Pixi installation:** if Pixi is not already installed, the start script will detect this and offer to install it automatically on both Windows and Linux. No manual steps needed.
 
 **2. A Google Earth Engine key file**
 A small file (ending in `.json`) that gives the app access to Google Earth Engine. If you do not have one yet, see [Getting a key](#getting-a-key) below.
@@ -32,19 +30,15 @@ A small file (ending in `.json`) that gives the app access to Google Earth Engin
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Start.command` |
-| Windows | Double-click `Start.bat` |
-| Linux | Open a terminal in the folder and run `./quickstart-react.sh` |
+| Windows | Double-click `Start-docker.bat` |
+| Linux | Open a terminal in the folder and run `./Start-docker.sh` |
 
 **Pixi option:**
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Start-pixi.command` |
 | Windows | Double-click `Start-pixi.bat` |
-| Linux | Open a terminal in the folder and run `./start-pixi.sh` |
-
-> **Mac — first launch only (both options):** if you see "cannot be opened because the developer cannot be verified", right-click the file, choose **Open**, then click **Open**. You will not be asked again.
+| Linux | Open a terminal in the folder and run `./Start-pixi.sh` |
 
 The first launch takes a few minutes to set up. You can use this time to read the [User Manual](USER_MANUAL.md). When it is ready, your browser will open automatically.
 
@@ -56,17 +50,15 @@ The first launch takes a few minutes to set up. You can use this time to read th
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Stop.command` |
-| Windows | Double-click `Stop.bat` |
-| Linux | Run `./stop.sh` in a terminal |
+| Windows | Double-click `Stop-docker.bat` |
+| Linux | Run `./Stop-docker.sh` in a terminal |
 
 **Pixi option:**
 
 | Platform | Action |
 |----------|--------|
-| macOS | Double-click `Stop-pixi.command` |
 | Windows | Double-click `Stop-pixi.bat` |
-| Linux | Run `./stop-pixi.sh` in a terminal |
+| Linux | Run `./Stop-pixi.sh` in a terminal |
 
 Closing the browser tab does **not** stop the app — any running download will continue in the background until you use the stop file.
 
@@ -96,14 +88,12 @@ The first time you open the app it will ask you to upload this file. After that 
 
 | 選項 | 適合對象 | 需求 |
 |------|----------|------|
-| **Docker** | 一般使用者 | 安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop) |
-| **Pixi** | 無法使用 Docker 的使用者 | 執行一行安裝指令（見下方說明） |
+| **Docker** | 需要完整環境隔離——不在本機安裝任何東西 | 安裝 [Docker Desktop](https://www.docker.com/products/docker-desktop) |
+| **Pixi** | Docker 受限或無法使用的環境（例如企業管理電腦） | 若尚未安裝，啟動腳本會自動處理（見下方說明） |
 
-兩種選項都會在瀏覽器中呈現相同的應用程式。Docker 使用容器執行所有程式；Pixi 則直接在您的電腦上執行，不需要容器。
+兩種選項都會在瀏覽器中呈現相同的應用程式。Docker 使用隔離容器執行，不影響系統；Pixi 則直接在您的電腦上安裝依賴套件，不需要容器。
 
-> **安裝 Pixi**（若選擇此選項）：
-> - **Mac / Linux：** 開啟終端機，執行 `curl -fsSL https://pixi.sh/install.sh | sh`，然後關閉並重新開啟終端機。
-> - **Windows：** 開啟 PowerShell，執行 `iwr -useb https://pixi.sh/install.ps1 | iex`，然後關閉並重新開啟。
+> **Pixi 安裝說明：** 若尚未安裝 Pixi，啟動腳本在 Windows 與 Linux 上都會自動偵測並提示您安裝，無需手動操作。
 
 **2. Google Earth Engine 金鑰檔案**
 一個小檔案（副檔名為 `.json`），用於授權應用程式存取 Google Earth Engine。如果您還沒有，請參閱下方的[取得金鑰](#取得金鑰)說明。
@@ -116,19 +106,15 @@ The first time you open the app it will ask you to upload this file. After that 
 
 | 平台 | 操作方式 |
 |------|----------|
-| macOS | 雙擊 `Start.command` |
-| Windows | 雙擊 `Start.bat` |
-| Linux | 在資料夾中開啟終端機並執行 `./quickstart-react.sh` |
+| Windows | 雙擊 `Start-docker.bat` |
+| Linux | 在資料夾中開啟終端機並執行 `./Start-docker.sh` |
 
 **Pixi 選項：**
 
 | 平台 | 操作方式 |
 |------|----------|
-| macOS | 雙擊 `Start-pixi.command` |
 | Windows | 雙擊 `Start-pixi.bat` |
-| Linux | 在資料夾中開啟終端機並執行 `./start-pixi.sh` |
-
-> **Mac — 首次啟動（兩種選項皆適用）：** 若出現「無法開啟，因為無法驗證開發者」的提示，請右鍵點擊該檔案，選擇**開啟**，然後點擊**開啟**。之後不會再出現此提示。
+| Linux | 在資料夾中開啟終端機並執行 `./Start-pixi.sh` |
 
 首次啟動需要幾分鐘進行初始化。您可以利用這段時間閱讀[使用手冊](USER_MANUAL.md)。準備就緒後，瀏覽器將自動開啟。
 
@@ -140,17 +126,15 @@ The first time you open the app it will ask you to upload this file. After that 
 
 | 平台 | 操作方式 |
 |------|----------|
-| macOS | 雙擊 `Stop.command` |
-| Windows | 雙擊 `Stop.bat` |
-| Linux | 在終端機中執行 `./stop.sh` |
+| Windows | 雙擊 `Stop-docker.bat` |
+| Linux | 在終端機中執行 `./Stop-docker.sh` |
 
 **Pixi 選項：**
 
 | 平台 | 操作方式 |
 |------|----------|
-| macOS | 雙擊 `Stop-pixi.command` |
 | Windows | 雙擊 `Stop-pixi.bat` |
-| Linux | 在終端機中執行 `./stop-pixi.sh` |
+| Linux | 在終端機中執行 `./Stop-pixi.sh` |
 
 關閉瀏覽器分頁不會停止應用程式——任何正在進行的下載都會在背景繼續，直到您使用對應的停止檔案為止。
 

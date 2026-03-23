@@ -128,5 +128,5 @@ echo   Backend  : http://localhost:%BACKEND_PORT%
 echo  ==========================================
 echo.
 start "" "http://localhost:%FRONTEND_PORT%"
-echo  Run Stop.bat when you are done.
+echo  Run Stop-docker.bat when you are done.
 echo.

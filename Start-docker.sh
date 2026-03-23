@@ -1,9 +1,4 @@
-#!/usr/bin/env bash
-# quickstart-react.sh — start the React + FastAPI stack
-#
-# Usage:
-#   ./quickstart-react.sh          # production build (nginx + FastAPI)
-#   ./quickstart-react.sh --dev    # Vite dev server with HMR + FastAPI
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -79,7 +74,7 @@ if [ -f ".pixi.pid" ]; then
     if kill -0 "$PIXI_PID" 2>/dev/null; then
         PIXI_PORT=$(cat .pixi.port 2>/dev/null || echo "unknown")
         echo "ERROR: A pixi-managed backend is already running (PID $PIXI_PID, port $PIXI_PORT)."
-        echo "Stop it first with: ./stop-pixi.sh"
+        echo "Stop it first with: ./Stop-pixi.sh"
         exit 1
     else
         rm -f .pixi.pid .pixi.port
@@ -167,4 +162,4 @@ else
   exit 1
 fi
 
-echo "Run ./stop.sh (or './stop.sh --all' to also stop dev/legacy containers) when you are done."
+echo "Run ./Stop-docker.sh (or './Stop-docker.sh --all' to also stop dev/legacy containers) when you are done."

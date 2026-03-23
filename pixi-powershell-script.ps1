@@ -45,7 +45,7 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
         if ($runningContainers) {
             Write-Host "  ERROR: Docker containers for this app are already running:"
             $runningContainers | ForEach-Object { Write-Host "    $_" }
-            Write-Host "  Stop them first with: Stop.bat"
+            Write-Host "  Stop them first with: Stop-docker.bat"
             Write-Host ""
             exit 1
         }

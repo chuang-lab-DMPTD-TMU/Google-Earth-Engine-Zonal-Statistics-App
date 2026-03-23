@@ -12,11 +12,31 @@ echo ""
 
 # --- Check pixi ---
 if ! command -v pixi &>/dev/null; then
-    echo " Pixi not found. Install it with:"
-    echo "   curl -fsSL https://pixi.sh/install.sh | sh"
-    echo " Then open a new terminal and try again."
+    echo " Pixi not found."
     echo ""
-    exit 1
+    read -rp " Install Pixi now? [Y/N] " answer
+    if [[ "$answer" =~ ^[Yy] ]]; then
+        echo " Installing Pixi..."
+        if ! curl -fsSL https://pixi.sh/install.sh | sh; then
+            echo " Pixi installation failed. Please install manually and try again."
+            echo ""
+            exit 1
+        fi
+        # Refresh PATH so pixi is visible in this session
+        export PATH="$HOME/.pixi/bin:$PATH"
+        if ! command -v pixi &>/dev/null; then
+            echo " Pixi installed but not found in PATH."
+            echo " Please open a new terminal and run this script again."
+            echo ""
+            exit 1
+        fi
+        echo " Pixi ready."
+        echo ""
+    else
+        echo " Pixi is required. Exiting."
+        echo ""
+        exit 1
+    fi
 fi
 
 # --- Check for conflicting Docker containers ---
@@ -89,5 +109,5 @@ echo " =========================================="
 echo ""
 
 xdg-open "http://localhost:${PORT}" 2>/dev/null || true
-echo " Run ./stop-pixi.sh when you are done."
+echo " Run ./Stop-pixi.sh when you are done."
 echo ""

@@ -1,0 +1,39 @@
+INFO:     Started server process [2000348]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:59284 - "GET /api/gee-key HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59288 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59288 - "GET /assets/index-DXJdTyK-.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59292 - "GET /assets/index-byvsuPH4.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59288 - "GET /api/gee-key HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59292 - "GET /earth.svg HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:59292 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59288 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59302 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59302 - "GET /assets/index-DXJdTyK-.js HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59300 - "GET /assets/index-byvsuPH4.css HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59302 - "GET /api/gee-key HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59302 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59306 - "GET /earth.svg HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:59300 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59320 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59328 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59038 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59052 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59328 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59080 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59080 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59082 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59082 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48626 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48626 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48634 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:48634 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36278 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36278 - "GET /api/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36280 - "GET /api/events?limit=50 HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [2000348]
