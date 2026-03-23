@@ -4,6 +4,7 @@ import { getRun, stopRun, triggerPartialCheckout, submitRun, retryRun } from '@/
 import { parquetDownloadUrl, csvDownloadUrl, downloadPartialCheckout, downloadPartialCheckoutCsv } from '@/api'
 import { useAppStore } from '@/store'
 import RunStatusBadge from '@/components/runs/RunStatusBadge'
+import HelpTooltip from '@/components/ui/HelpTooltip'
 
 interface Props {
   runId: string | null
@@ -108,7 +109,7 @@ export default function ResultsPanel({ runId }: Props) {
       {/* Submit new run (only when no active run is selected) */}
       {!runId && pendingRun.products.length > 0 && (
         <div className="card p-3">
-          <p className="section-title">New Run</p>
+          <p className="section-title flex items-center gap-1.5">New Run <HelpTooltip text="Submit your configured datasets and area of interest to start downloading satellite data from Google Earth Engine." /></p>
           <p className="text-xs text-gray-500 mb-2 font-mono">{pendingRun.run_id}</p>
           <button
             className="btn-primary w-full"
@@ -194,7 +195,7 @@ export default function ResultsPanel({ runId }: Props) {
                 if (!products || Object.keys(products).length === 0) return null
                 return (
                   <div>
-                    <p className="section-title">Scheduled Datasets</p>
+                    <p className="section-title flex items-center gap-1.5">Scheduled Datasets <HelpTooltip text="The satellite data products queued for this run, with their configured date ranges, bands, and processing statistics." /></p>
                     <div className="flex flex-col gap-2">
                       {Object.entries(products).map(([id, cfg]) => (
                         <div key={id} className="card p-3 space-y-1.5">
@@ -266,7 +267,7 @@ export default function ResultsPanel({ runId }: Props) {
               {/* Final downloads */}
               {run.status === 'completed' && run.products.length > 0 && (
                 <div>
-                  <p className="section-title">Download Results</p>
+                  <p className="section-title flex items-center gap-1.5">Download Results <HelpTooltip text="Download the fully completed analysis output. GeoParquet preserves geometry; CSV is a flat table without spatial data." /></p>
                   <div className="flex flex-col gap-2">
                     {run.products.map((product) => (
                       <div key={product} className="card p-3">
@@ -296,7 +297,7 @@ export default function ResultsPanel({ runId }: Props) {
               {/* Partial checkout downloads */}
               {run.status !== 'completed' && run.products.length > 0 && (
                 <div>
-                  <p className="section-title">Partial Checkout</p>
+                  <p className="section-title flex items-center gap-1.5">Partial Checkout <HelpTooltip text="Download data for chunks that have already finished, even while the run is still in progress or has partially failed." /></p>
                   <div className="flex flex-col gap-2">
                     {run.products.map((product) => (
                       <div key={product} className="card p-3">
@@ -329,7 +330,7 @@ export default function ResultsPanel({ runId }: Props) {
               {/* Run log */}
               {run.events.length > 0 && (
                 <div>
-                  <p className="section-title">Run Log</p>
+                  <p className="section-title flex items-center gap-1.5">Run Log <HelpTooltip text="Detailed event log for this run: job starts, completions, and any errors encountered during processing." direction="right" /></p>
                   <div className="card overflow-hidden">
                     <ul className="divide-y divide-gray-100 max-h-64 overflow-y-auto">
                       {run.events.slice(-50).map((ev, i) => {

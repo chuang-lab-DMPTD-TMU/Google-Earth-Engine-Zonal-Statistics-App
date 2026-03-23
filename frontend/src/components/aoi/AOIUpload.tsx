@@ -5,6 +5,7 @@ import { uploadAOI } from '@/api'
 import type { AOIInfo } from '@/types'
 import MapPreview from './MapPreview'
 import SnakemakeLog from './SnakemakeLog'
+import HelpTooltip from '@/components/ui/HelpTooltip'
 
 interface Props {
   runId: string | null
@@ -48,7 +49,7 @@ export default function AOIUpload({ runId, existingAoiName }: Props) {
   return (
     <div className="flex flex-col gap-3 h-full">
       <div>
-        <p className="section-title">Area of Interest</p>
+        <p className="section-title flex items-center gap-1.5">Area of Interest <HelpTooltip text="Upload the geographic region to download satellite data for. Accepts shapefiles (.zip), GeoJSON, or GeoParquet files." direction="right" /></p>
 
         {!runId && (
           <p className="text-xs text-gray-400">

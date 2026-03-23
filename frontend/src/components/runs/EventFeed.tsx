@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { listEvents } from '@/api'
+import HelpTooltip from '@/components/ui/HelpTooltip'
 
 export default function EventFeed() {
   const { data: events = [] } = useQuery({
@@ -10,7 +11,7 @@ export default function EventFeed() {
 
   return (
     <div>
-      <p className="section-title">Event Log</p>
+      <p className="section-title flex items-center gap-1.5">Event Log <HelpTooltip text="Live feed of events across all runs, showing job starts, completions, and errors in real time." /></p>
       {events.length === 0 ? (
         <p className="text-xs text-gray-400">No events yet.</p>
       ) : (

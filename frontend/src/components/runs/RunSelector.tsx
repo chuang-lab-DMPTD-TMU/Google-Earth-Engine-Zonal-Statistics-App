@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { listRuns } from '@/api'
 import { useAppStore } from '@/store'
 import RunStatusBadge from './RunStatusBadge'
+import HelpTooltip from '@/components/ui/HelpTooltip'
 
 export default function RunSelector() {
   const { data: runs = [] } = useQuery({
@@ -37,7 +38,10 @@ export default function RunSelector() {
   return (
     <div>
       <div className="flex items-center justify-between mb-2">
-        <p className="section-title mb-0">Run Session</p>
+        <div className="flex items-center gap-1.5">
+          <p className="section-title mb-0">Run Session</p>
+          <HelpTooltip text="A run session groups your dataset requests. Create a new one or select a previous run to view its results." />
+        </div>
         <button
           className="text-xs text-brand-600 hover:text-brand-800 font-medium disabled:opacity-40 disabled:cursor-not-allowed"
           onClick={showNew ? () => setShowNew(false) : openNew}

@@ -86,6 +86,19 @@ def build_regions(shp_path, simplify_tolerance=None):
         else:
             gdf['region_id'] = gdf.index.astype(str)
 
+    # Ensure region_id is unique — deduplicate by appending _1, _2, ... to repeated values
+    if gdf['region_id'].duplicated().any():
+        counts = {}
+        new_ids = []
+        for rid in gdf['region_id']:
+            if rid in counts:
+                counts[rid] += 1
+                new_ids.append(f"{rid}_{counts[rid]}")
+            else:
+                counts[rid] = 0
+                new_ids.append(rid)
+        gdf['region_id'] = new_ids
+
     # Simplify if needed
     if simplify_tolerance is not None:
         gdf["geometry"] = gdf.geometry.simplify(simplify_tolerance, preserve_topology=True)

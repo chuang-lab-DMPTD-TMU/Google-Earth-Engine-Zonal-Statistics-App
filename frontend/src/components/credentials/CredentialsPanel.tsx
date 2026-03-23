@@ -3,6 +3,7 @@ import { useDropzone } from 'react-dropzone'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { uploadGeeKey } from '@/api'
 import type { GeeKeyStatus } from '@/types'
+import HelpTooltip from '@/components/ui/HelpTooltip'
 
 interface Props {
   keyStatus: GeeKeyStatus | null
@@ -44,7 +45,7 @@ export default function CredentialsPanel({ keyStatus }: Props) {
   if (keyStatus?.valid && !replacing) {
     return (
       <div>
-        <p className="section-title">GEE Credentials</p>
+        <p className="section-title flex items-center gap-1.5">GEE Credentials <HelpTooltip text="Upload your Google Earth Engine service account JSON key to authenticate API access." /></p>
         <div className="card p-3 flex items-center gap-2">
           <span className="text-green-500 text-base">●</span>
           <div className="flex-1 min-w-0">

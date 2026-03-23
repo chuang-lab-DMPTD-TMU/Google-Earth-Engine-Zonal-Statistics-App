@@ -35,6 +35,7 @@ import yaml
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
@@ -44,7 +45,10 @@ BASE_DATA_DIR = _docker_data if _docker_data.exists() else Path(__file__).parent
 RUNS_DIR      = BASE_DATA_DIR / "runs"
 CONFIG_DIR    = Path("/tmp/gee_configs")
 GEE_KEY_PATH  = Path(
-    os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "/app/config/gee-key.json")
+    os.environ.get(
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        str(Path(__file__).parent.parent / "config" / "gee-key.json"),
+    )
 )
 APP_DIR       = Path(__file__).parent.parent        # repo root
 SNAKEFILE     = APP_DIR / "Snakefile_parquet"
@@ -134,11 +138,11 @@ PRODUCT_REGISTRY: dict[str, dict] = {
         "ee_collection": "ESA/WorldCover/v100",
         "min_date": "2020-01-01",
         "max_date": "2020-12-31",
-        "scale": 10,
+        "scale": 500,
         "cadence": "annual",
-        "categorical": False,
+        "categorical": True,
         "content": {
-            "Map": {"stats": ["mean", "sum"], "default_stats": ["mean"]},
+            "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
         },
         "label": "ESA WorldCover 2020 (v1.0)",
         "description": "ESA WorldCover landcover classification v100 (10m, 2020).",
@@ -148,11 +152,11 @@ PRODUCT_REGISTRY: dict[str, dict] = {
         "ee_collection": "ESA/WorldCover/v200",
         "min_date": "2021-01-01",
         "max_date": "2021-12-31",
-        "scale": 10,
+        "scale": 500,
         "cadence": "annual",
-        "categorical": False,
+        "categorical": True,
         "content": {
-            "Map": {"stats": ["mean", "sum"], "default_stats": ["mean"]},
+            "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
         },
         "label": "ESA WorldCover 2021 (v2.0)",
         "description": "ESA WorldCover landcover classification v200 (10m, 2021).",
@@ -423,7 +427,10 @@ def _update_registry(run_id: str, payload: dict, status: str,
         "config_hash":          config_hash,
         "payload":              payload,
         "last_error":           error_message,
-        "snakemake_pid":        existing.get("snakemake_pid"),
+        # Clear the old PID when transitioning to running so that _resolve_status
+        # doesn't see the dead PID from a previous attempt and immediately flip
+        # the status back to failed before _set_execution_meta writes the new PID.
+        "snakemake_pid":        None if status == "running" else existing.get("snakemake_pid"),
         "snakemake_log_path":   existing.get("snakemake_log_path"),
         "snakemake_config_path":existing.get("snakemake_config_path"),
         "snakefile":            existing.get("snakefile", str(SNAKEFILE)),
@@ -1126,3 +1133,10 @@ def download_partial_parquet(run_id: str, product: str):
         media_type="application/octet-stream",
         headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
     )
+
+# ─── SPA static files (pixi / local dev only) ─────────────────────────────────
+# Mount the built React app so a single `uvicorn` process serves everything.
+# In Docker the nginx container handles this instead, so this is a no-op there.
+_dist = APP_DIR / "frontend" / "dist"
+if _dist.exists():
+    app.mount("/", StaticFiles(directory=_dist, html=True), name="spa")

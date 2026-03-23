@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getRunLog } from '@/api'
 import { useAppStore } from '@/store'
+import HelpTooltip from '@/components/ui/HelpTooltip'
 
 interface Props {
   runId: string
@@ -28,7 +29,7 @@ export default function SnakemakeLog({ runId }: Props) {
 
   return (
     <div className="flex flex-col h-full">
-      <p className="section-title shrink-0">Snakemake Log</p>
+      <p className="section-title shrink-0 flex items-center gap-1.5">Snakemake Log <HelpTooltip text="Raw Snakemake workflow output for this run. Lines are colour-coded: red for errors, yellow for warnings, and green for completions." direction="right" /></p>
       <div className="flex-1 rounded-lg border border-gray-200 bg-gray-950 overflow-y-auto p-3 font-mono text-xs min-h-0">
         {isLoading && (
           <span className="text-gray-500">Loading…</span>

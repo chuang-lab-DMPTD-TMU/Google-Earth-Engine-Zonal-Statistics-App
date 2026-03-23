@@ -1,0 +1,52 @@
+[project]
+name = "gee-web-app"
+version = "0.1.0"
+description = "GEE zonal statistics web app"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
+
+# ── Native / conda-forge dependencies ─────────────────────────────────────────
+[dependencies]
+python = "3.10.*"
+gdal = "*"
+proj = "*"
+geopandas = ">=1.0"
+pyarrow = ">=15"
+duckdb = ">=0.10"
+graphviz = "*"
+nodejs = "20.*"
+
+# ── Pure-Python / pip dependencies ────────────────────────────────────────────
+[pypi-dependencies]
+earthengine-api = "==1.5.2"
+geemap = "==0.32.0"
+pycrs = "==1.0.2"
+folium = "==0.19.4"
+numpy = ">=2.0"
+pandas = ">=2.0"
+fastapi = ">=0.115"
+uvicorn = { version = ">=0.32", extras = ["standard"] }
+python-multipart = ">=0.0.12"
+pyyaml = ">=6.0"
+snakemake = "==7.32.4"
+pulp = "==2.7.0"
+
+# ── Tasks ─────────────────────────────────────────────────────────────────────
+[tasks]
+
+# Install and build the React frontend into frontend/dist
+build-frontend = "npm --prefix frontend install && npm --prefix frontend run build"
+
+# Production: build frontend then serve everything from one uvicorn process
+[tasks.start]
+cmd = "uvicorn backend.app:app --host 0.0.0.0 --port 8000"
+depends-on = ["build-frontend"]
+env = { GOOGLE_APPLICATION_CREDENTIALS = "config/gee-key.json" }
+
+# Development: backend with auto-reload (run alongside `pixi run dev-frontend`)
+[tasks.dev-backend]
+cmd = "uvicorn backend.app:app --reload --port 8000"
+env = { GOOGLE_APPLICATION_CREDENTIALS = "config/gee-key.json" }
+
+# Development: Vite dev server with HMR
+dev-frontend = "npm --prefix frontend run dev"

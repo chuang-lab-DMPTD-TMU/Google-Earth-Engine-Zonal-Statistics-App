@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { getRun } from '@/api'
+import HelpTooltip from '@/components/ui/HelpTooltip'
 
 interface Props {
   runId: string
@@ -17,7 +18,7 @@ export default function RunDatasetView({ runId }: Props) {
   if (!products || Object.keys(products).length === 0) {
     return (
       <div>
-        <p className="section-title">Datasets</p>
+        <p className="section-title flex items-center gap-1.5">Datasets <HelpTooltip text="The satellite data products configured for this run, showing bands, statistics, and date ranges." direction="right" /></p>
         <p className="text-xs text-gray-400">No dataset config available.</p>
       </div>
     )
@@ -25,7 +26,7 @@ export default function RunDatasetView({ runId }: Props) {
 
   return (
     <div>
-      <p className="section-title">Datasets</p>
+      <p className="section-title flex items-center gap-1.5">Datasets <HelpTooltip text="The satellite data products configured for this run, showing bands, statistics, and date ranges." direction="right" /></p>
       <div className="flex flex-col gap-2">
         {Object.entries(products).map(([id, cfg]) => (
           <div key={id} className="card border-brand-300 transition-colors">

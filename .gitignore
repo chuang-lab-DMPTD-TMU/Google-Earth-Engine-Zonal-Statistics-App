@@ -11,6 +11,11 @@ data/runs/
 # --- Snakemake internals ---
 .snakemake/
 
+# --- Pixi ---
+.pixi/
+.pixi.pid
+.pixi.port
+
 # --- Python ---
 __pycache__/
 *.py[cod]

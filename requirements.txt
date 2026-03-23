@@ -1,3 +1,8 @@
+# NOTE: This file is a legacy artifact from the Streamlit era.
+# Active dependencies are managed by:
+#   - backend/requirements.txt  (Docker / pip users)
+#   - pixi.toml                 (Pixi users)
+
 # Core Geospatial Stack
 earthengine-api==1.5.2
 geemap==0.32.0
@@ -5,23 +10,18 @@ pycrs==1.0.2
 geopandas==1.0.1
 folium==0.19.4
 ipyleaflet==0.19.2
-rasterio  # Good practice for local processing
+rasterio
 
 # Data Handling
 numpy>=2.0.0
 pandas>=2.0.0
 matplotlib>=3.10.0
 pyarrow>=15.0.0
-duckdb>=0.10.0  # For GeoJSON → GeoParquet conversion with spatial extension
+duckdb>=0.10.0
 
-# New Requirements
-streamlit
+# Pipeline
 snakemake==7.32.4
 graphviz
-
-# Jupyter/Server (Required if running Streamlit/Notebooks)
-jupyterlab
-ipykernel
 
 # Pin PuLP version to avoid compatibility issues
 pulp==2.7.0

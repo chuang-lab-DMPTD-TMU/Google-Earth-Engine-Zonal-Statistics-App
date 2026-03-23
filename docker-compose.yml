@@ -47,27 +47,3 @@ services:
     restart: unless-stopped
     profiles:
       - prod
-
-  # ── Legacy Streamlit app (kept during migration) ─────────────────────────────
-  app:
-    build: .
-    container_name: gee_manager
-    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
-    ports:
-      - "${STREAMLIT_PORT:-8501}:${STREAMLIT_PORT:-8501}"
-    working_dir: /app
-    volumes:
-      - .:/app
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/config/gee-key.json
-      - HOME=/tmp
-      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
-    command:
-      - "streamlit"
-      - "run"
-      - "main.py"
-      - "--server.port=${STREAMLIT_PORT:-8501}"
-      - "--server.address=0.0.0.0"
-      - "--server.fileWatcherType=watchdog"
-    profiles:
-      - legacy
