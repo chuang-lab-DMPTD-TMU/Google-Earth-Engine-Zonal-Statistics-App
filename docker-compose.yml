@@ -15,6 +15,7 @@ services:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/config/gee-key.json
       - HOME=/tmp
+      - PYTHONWARNINGS=ignore::FutureWarning
     restart: unless-stopped
 
   # ── React frontend (dev) ─────────────────────────────────────────────────────

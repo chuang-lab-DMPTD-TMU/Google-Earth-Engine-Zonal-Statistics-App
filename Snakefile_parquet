@@ -12,12 +12,20 @@ import pandas as pd
 import os
 from pathlib import Path
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="google")
+
+
 # Configuration
 PRODUCTS = config.get("products", {})
 SHP = config.get("shp_path", "")
 RUN_ID = config.get("run_id", "default")
 APP_DIR = config.get("app_dir", "/app")
-CHAIN_PARALLEL_WINDOW = int(config.get("chain_parallel_window", 3))
+_gee_slots    = int(config.get("gee_concurrency", 10))
+_num_products = max(1, len(PRODUCTS))
+_dynamic_window = -(-_gee_slots // _num_products)  # ceiling division
+CHAIN_PARALLEL_WINDOW = int(config.get("chain_parallel_window", _dynamic_window))
+
 
 
 # Directory structure — absolute paths so the Snakefile works correctly
@@ -26,6 +34,7 @@ GEOJSON_CHUNKS_DIR = f"{APP_DIR}/data/runs/{RUN_ID}/intermediate/geojson"
 PARQUET_CHUNKS_DIR = f"{APP_DIR}/data/runs/{RUN_ID}/intermediate/chunks"
 RESULTS_DIR        = f"{APP_DIR}/data/runs/{RUN_ID}/results"
 LOGS_DIR           = f"{APP_DIR}/data/runs/{RUN_ID}/logs"
+PREPPED_AOI        = f"{APP_DIR}/data/runs/{RUN_ID}/intermediate/aoi_prepped.parquet"
 
 def infer_time_chunks(settings):
     """Generate time chunks based on cadence.
@@ -56,26 +65,16 @@ def infer_time_chunks(settings):
             result.append(f"{group[0]}_{group[-1]}")
         return result
 
-    months = [dt.strftime("%Y-%m") for dt in pd.date_range(start=start, end=end, freq="MS")]
-    result = []
-    for i in range(0, len(months), 3):
-        group = months[i:i + 3]
-        result.append(f"{group[0]}_{group[-1]}")
-    return result
-
-def get_final_targets():
-    """Define final output files: merged GeoParquet + cleanup marker per product."""
-    targets = []
-    for prod, settings in PRODUCTS.items():
-        start, end = settings["start_date"], settings["end_date"]
-        targets.append(f"{RESULTS_DIR}/{prod}/{prod}_{start}_to_{end}.parquet")
-        targets.append(f"{RESULTS_DIR}/{prod}/.cleanup_done")
-    return targets
+    raise ValueError(f"Unsupported cadence: {cadence!r}. Must be one of: annual, daily, composite.")
 
 def get_previous_chunk_output(wildcards):
     """
-    Enforce sequential execution with sliding window to prevent 
-    overwhelming GEE API with parallel requests.
+    Enforce time-series ordering within each band using a sliding window.
+    Chunk N cannot start until chunk N-CHAIN_PARALLEL_WINDOW's parquet exists,
+    ensuring partial checkouts always contain a contiguous time series from
+    the start rather than scattered chunks.
+    Uses ancient() so a re-run of the prev chunk (e.g. after a restart) does
+    not cascade mtime invalidations through the rest of the chain.
     """
     chunks = infer_time_chunks(PRODUCTS[wildcards.prod])
     try:
@@ -87,8 +86,18 @@ def get_previous_chunk_output(wildcards):
         return []
 
     prev_chunk = chunks[idx - CHAIN_PARALLEL_WINDOW]
-    # Return the parquet chunk (since GeoJSON is intermediate)
-    return f"{PARQUET_CHUNKS_DIR}/{wildcards.prod}/{wildcards.band}_{prev_chunk}.parquet"
+    return ancient(f"{PARQUET_CHUNKS_DIR}/{wildcards.prod}/{wildcards.band}_{prev_chunk}.parquet")
+
+
+def get_final_targets():
+    """Define final output files: merged GeoParquet + cleanup marker per product."""
+    targets = []
+    for prod, settings in PRODUCTS.items():
+        start, end = settings["start_date"], settings["end_date"]
+        targets.append(f"{RESULTS_DIR}/{prod}/{prod}_{start}_to_{end}.parquet")
+        targets.append(f"{RESULTS_DIR}/{prod}/.cleanup_done")
+    return targets
+
 
 # ==============================================================================
 # Rules
@@ -146,6 +155,23 @@ onerror:
         except Exception:
             pass
 
+rule preprocess_aoi:
+    """
+    Pre-process the AOI once per run: normalise CRS, assign region_id,
+    apply geometry simplification, write to GeoParquet.
+    All chunk workers depend on this output instead of the raw shapefile,
+    so the coordinate-counting / simplification ladder runs exactly once.
+    """
+    input:
+        shp = SHP
+    output:
+        aoi = PREPPED_AOI
+    log:
+        f"{LOGS_DIR}/preprocess_aoi.log"
+    script:
+        "scripts/preprocess_aoi.py"
+
+
 rule extract_geojson_chunk:
     """
     Step 1: Extract zonal statistics from GEE as GeoJSON.
@@ -153,7 +179,7 @@ rule extract_geojson_chunk:
     Preserves geometry for spatial analysis.
     """
     input:
-        shp = SHP,
+        aoi  = PREPPED_AOI,
         prev = get_previous_chunk_output
     output:
         geojson = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.geojson"
@@ -168,7 +194,8 @@ rule extract_geojson_chunk:
         time_chunk = r"\d{4}(-\d{2}(_\d{4}-\d{2})?)?"
     params:
         stats = lambda wildcards: PRODUCTS[wildcards.prod]["statistics"],
-        ee_collection = lambda wildcards: PRODUCTS[wildcards.prod]["ee_collection"],
+        ee_collection = lambda wildcards: PRODUCTS[wildcards.prod].get("ee_collection"),
+        multi_collections = lambda wildcards: PRODUCTS[wildcards.prod].get("multi_collections"),
         scale = lambda wildcards: PRODUCTS[wildcards.prod]["scale"],
         cadence = lambda wildcards: PRODUCTS[wildcards.prod].get("cadence", "monthly"),
         categorical = lambda wildcards: PRODUCTS[wildcards.prod].get("categorical", False),
@@ -221,7 +248,7 @@ rule merge_product_parquet:
     output:
         merged = f"{RESULTS_DIR}/{{prod}}/{{prod}}_{{start}}_to_{{end}}.parquet"
     params:
-        merge_strategy = "wide"  # or "long" for normalized form
+        merge_strategy = "long"
     threads: 2
     log:
         f"{LOGS_DIR}/{{prod}}/merge_{{start}}_to_{{end}}.log"

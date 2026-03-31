@@ -2,6 +2,7 @@ import type { RunStatus } from '@/types'
 
 const CLASSES: Record<RunStatus, string> = {
   running:   'badge-running',
+  paused:    'badge bg-amber-100 text-amber-700',
   completed: 'badge-completed',
   failed:    'badge-failed',
   stopped:   'badge-stopped',

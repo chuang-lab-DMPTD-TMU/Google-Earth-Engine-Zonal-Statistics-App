@@ -1,10 +1,31 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
-import { getRun, stopRun, triggerPartialCheckout, submitRun, retryRun } from '@/api'
+import { useState, useEffect } from 'react'
+import { getRun, stopRun, pauseRun, resumeRun, triggerPartialCheckout, submitRun, retryRun, resetRun } from '@/api'
 import { parquetDownloadUrl, csvDownloadUrl, downloadPartialCheckout, downloadPartialCheckoutCsv } from '@/api'
 import { useAppStore } from '@/store'
 import RunStatusBadge from '@/components/runs/RunStatusBadge'
 import HelpTooltip from '@/components/ui/HelpTooltip'
+
+const DEFAULT_GEE_CONCURRENCY = 2
+
+function GeeConcurrencyInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="text-xs text-gray-500 whitespace-nowrap flex items-center gap-1">
+        GEE workers
+        <HelpTooltip text="Number of concurrent Google Earth Engine requests. Higher values finish faster but risk hitting GEE quota limits." />
+      </label>
+      <input
+        type="number"
+        min={1}
+        max={10}
+        value={value}
+        onChange={(e) => onChange(Math.max(1, Math.min(10, Number(e.target.value))))}
+        className="w-16 text-xs border border-gray-200 rounded px-2 py-1 text-center"
+      />
+    </div>
+  )
+}
 
 interface Props {
   runId: string | null
@@ -16,6 +37,7 @@ export default function ResultsPanel({ runId }: Props) {
   const [retrying, setRetrying] = useState(false)
   const [partialDownloading, setPartialDownloading] = useState<string | null>(null)
   const [partialError, setPartialError] = useState<string | null>(null)
+  const [geeConcurrency, setGeeConcurrency] = useState(DEFAULT_GEE_CONCURRENCY)
 
   const handlePartialDownload = async (product: string, format: 'parquet' | 'csv') => {
     const key = `${product}:${format}`
@@ -40,14 +62,19 @@ export default function ResultsPanel({ runId }: Props) {
     enabled:  Boolean(runId),
     refetchInterval: (query) => {
       const status = query.state.data?.status
-      if (status === 'running' || retrying) return 2_000
+      if (status === 'running' || status === 'paused' || retrying) return 2_000
       return false
     },
   })
 
+  // Sync concurrency input when an existing run is loaded
+  useEffect(() => {
+    if (run?.gee_concurrency) setGeeConcurrency(run.gee_concurrency)
+  }, [run?.gee_concurrency])
+
   const submitMutation = useMutation({
     mutationFn: () =>
-      submitRun({ run_id: pendingRun.run_id, products: pendingRun.products }),
+      submitRun({ run_id: pendingRun.run_id, products: pendingRun.products, gee_concurrency: geeConcurrency }),
     onSuccess: (detail) => {
       setIsRunning(true)
       setActiveRunId(detail.run_id)
@@ -64,14 +91,26 @@ export default function ResultsPanel({ runId }: Props) {
     },
   })
 
+  const pauseMutation = useMutation({
+    mutationFn: () => pauseRun(runId!),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['run', runId] }),
+  })
+
+  const resumeMutation = useMutation({
+    mutationFn: () => resumeRun(runId!, geeConcurrency !== run?.gee_concurrency ? geeConcurrency : undefined),
+    onSuccess: (detail) => {
+      queryClient.setQueryData(['run', runId], detail)
+      queryClient.invalidateQueries({ queryKey: ['runs'] })
+    },
+  })
+
   const partialMutation = useMutation({
     mutationFn: () => triggerPartialCheckout(runId!),
   })
 
   const retryMutation = useMutation({
-    mutationFn: () => retryRun(runId!),
+    mutationFn: () => retryRun(runId!, geeConcurrency),
     onMutate: () => {
-      // Optimistically mark the run as running so polling starts immediately
       setRetrying(true)
       queryClient.setQueryData(['run', runId], (old: any) =>
         old ? { ...old, status: 'running' } : old
@@ -84,10 +123,17 @@ export default function ResultsPanel({ runId }: Props) {
       queryClient.invalidateQueries({ queryKey: ['runs'] })
     },
     onError: () => {
-      // Roll back optimistic update on failure
       queryClient.invalidateQueries({ queryKey: ['run', runId] })
     },
     onSettled: () => setRetrying(false),
+  })
+
+  const nukeMutation = useMutation({
+    mutationFn: () => resetRun(runId!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['run', runId] })
+      queryClient.invalidateQueries({ queryKey: ['runs'] })
+    },
   })
 
   // Can submit if we have products configured and this is a fresh (unsubmitted) run
@@ -111,8 +157,9 @@ export default function ResultsPanel({ runId }: Props) {
         <div className="card p-3">
           <p className="section-title flex items-center gap-1.5">New Run <HelpTooltip text="Submit your configured datasets and area of interest to start downloading satellite data from Google Earth Engine." /></p>
           <p className="text-xs text-gray-500 mb-2 font-mono">{pendingRun.run_id}</p>
+          <GeeConcurrencyInput value={geeConcurrency} onChange={setGeeConcurrency} />
           <button
-            className="btn-primary w-full"
+            className="btn-primary w-full mt-2"
             onClick={() => submitMutation.mutate()}
             disabled={!canSubmit}
           >
@@ -172,6 +219,9 @@ export default function ResultsPanel({ runId }: Props) {
                         {run.job_counts.failed > 0 && (
                           <span className="text-red-500 ml-1">({run.job_counts.failed} failed)</span>
                         )}
+                        {run.job_counts.shelved > 0 && (
+                          <span className="text-amber-500 ml-1">({run.job_counts.shelved} shelved)</span>
+                        )}
                       </span>
                     </div>
                     <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
@@ -228,26 +278,65 @@ export default function ResultsPanel({ runId }: Props) {
               <div className="flex flex-col gap-2">
                 {run.status === 'running' && (
                   <button
-                    className="btn-danger w-full"
-                    onClick={() => stopMutation.mutate()}
-                    disabled={stopMutation.isPending}
+                    className="btn-secondary w-full"
+                    onClick={() => pauseMutation.mutate()}
+                    disabled={pauseMutation.isPending}
                   >
-                    {stopMutation.isPending ? 'Stopping…' : 'Stop Run'}
+                    {pauseMutation.isPending ? 'Pausing…' : 'Pause Run'}
                   </button>
                 )}
 
-                {run.status !== 'completed' && (
-                  <button
-                    className="btn-secondary w-full"
-                    onClick={() => partialMutation.mutate()}
-                    disabled={partialMutation.isPending}
-                  >
-                    {partialMutation.isPending ? 'Building…' : 'Build Partial Checkout'}
-                  </button>
+                {run.status === 'paused' && (
+                  <>
+                    <div className="card p-3 bg-amber-50 border border-amber-200 flex flex-col gap-2">
+                      <p className="text-xs font-medium text-amber-700">Run is paused</p>
+                      <GeeConcurrencyInput value={geeConcurrency} onChange={setGeeConcurrency} />
+                      {geeConcurrency !== run.gee_concurrency && (
+                        <p className="text-xs text-amber-600">
+                          Changing workers will restart in-flight jobs
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      className="btn-primary w-full"
+                      onClick={() => resumeMutation.mutate()}
+                      disabled={resumeMutation.isPending}
+                    >
+                      {resumeMutation.isPending ? 'Resuming…' : 'Resume Run'}
+                    </button>
+                    {resumeMutation.isError && (
+                      <p className="text-xs text-red-600 mt-1">
+                        {(resumeMutation.error as Error)?.message ?? 'Resume failed'}
+                      </p>
+                    )}
+                    <button
+                      className="btn-danger w-full"
+                      onClick={() => stopMutation.mutate()}
+                      disabled={stopMutation.isPending}
+                    >
+                      {stopMutation.isPending ? 'Stopping…' : 'Stop Run'}
+                    </button>
+                  </>
                 )}
+
+                {run.status !== 'completed' && run.status !== 'paused' && (() => {
+                  const finishedSet = new Set(run.finished_products ?? [])
+                  const hasInProgress = run.products.some((p) => !finishedSet.has(p))
+                  if (!hasInProgress) return null
+                  return (
+                    <button
+                      className="btn-secondary w-full"
+                      onClick={() => partialMutation.mutate()}
+                      disabled={partialMutation.isPending}
+                    >
+                      {partialMutation.isPending ? 'Building…' : 'Build Partial Checkout'}
+                    </button>
+                  )
+                })()}
 
                 {(run.status === 'failed' || run.status === 'stopped') && (
                   <>
+                    <GeeConcurrencyInput value={geeConcurrency} onChange={setGeeConcurrency} />
                     <button
                       className="btn-primary w-full"
                       onClick={() => retryMutation.mutate()}
@@ -260,72 +349,101 @@ export default function ResultsPanel({ runId }: Props) {
                         {(retryMutation.error as Error)?.message ?? 'Retry failed'}
                       </p>
                     )}
+                    <button
+                      className="btn-danger w-full"
+                      onClick={() => {
+                        if (confirm('Delete all generated files for this run? This cannot be undone. (run.yaml and uploaded AOI will be preserved)')) {
+                          nukeMutation.mutate()
+                        }
+                      }}
+                      disabled={nukeMutation.isPending}
+                    >
+                      {nukeMutation.isPending ? 'Resetting…' : 'Reset Run Directory'}
+                    </button>
+                    {nukeMutation.isError && (
+                      <p className="text-xs text-red-600 mt-1">
+                        {(nukeMutation.error as Error)?.message ?? 'Reset failed'}
+                      </p>
+                    )}
                   </>
                 )}
               </div>
 
-              {/* Final downloads */}
-              {run.status === 'completed' && run.products.length > 0 && (
-                <div>
-                  <p className="section-title flex items-center gap-1.5">Download Results <HelpTooltip text="Download the fully completed analysis output. GeoParquet preserves geometry; CSV is a flat table without spatial data." /></p>
-                  <div className="flex flex-col gap-2">
-                    {run.products.map((product) => (
-                      <div key={product} className="card p-3">
-                        <p className="text-xs font-medium text-gray-700 mb-2">{product}</p>
-                        <div className="flex gap-2">
-                          <a
-                            href={parquetDownloadUrl(run.run_id, product)}
-                            download
-                            className="btn-primary flex-1 text-center text-xs"
-                          >
-                            GeoParquet
-                          </a>
-                          <a
-                            href={csvDownloadUrl(run.run_id, product)}
-                            download
-                            className="btn-secondary flex-1 text-center text-xs"
-                          >
-                            CSV
-                          </a>
+              {/* Final downloads — completed run or individual finished products mid-run */}
+              {(() => {
+                const finishedSet = new Set(run.finished_products ?? [])
+                const productsToShow = run.status === 'completed'
+                  ? run.products
+                  : run.products.filter((p) => finishedSet.has(p))
+                if (productsToShow.length === 0) return null
+                return (
+                  <div>
+                    <p className="section-title flex items-center gap-1.5">Download Results <HelpTooltip text="Download the fully completed analysis output. GeoParquet preserves geometry; CSV is a flat table without spatial data." /></p>
+                    <div className="flex flex-col gap-2">
+                      {productsToShow.map((product) => (
+                        <div key={product} className="card p-3">
+                          <p className="text-xs font-medium text-gray-700 mb-2">{product}</p>
+                          <div className="flex gap-2">
+                            <a
+                              href={parquetDownloadUrl(run.run_id, product)}
+                              download
+                              className="btn-primary flex-1 text-center text-xs"
+                            >
+                              GeoParquet
+                            </a>
+                            <a
+                              href={csvDownloadUrl(run.run_id, product)}
+                              download
+                              className="btn-secondary flex-1 text-center text-xs"
+                            >
+                              CSV
+                            </a>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
+                )
+              })()}
 
-              {/* Partial checkout downloads */}
-              {run.status !== 'completed' && run.products.length > 0 && (
-                <div>
-                  <p className="section-title flex items-center gap-1.5">Partial Checkout <HelpTooltip text="Download data for chunks that have already finished, even while the run is still in progress or has partially failed." /></p>
-                  <div className="flex flex-col gap-2">
-                    {run.products.map((product) => (
-                      <div key={product} className="card p-3">
-                        <p className="text-xs font-medium text-gray-700 mb-2">{product}</p>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handlePartialDownload(product, 'parquet')}
-                            disabled={partialDownloading === `${product}:parquet`}
-                            className="btn-primary flex-1 text-center text-xs"
-                          >
-                            {partialDownloading === `${product}:parquet` ? 'Downloading…' : 'GeoParquet'}
-                          </button>
-                          <button
-                            onClick={() => handlePartialDownload(product, 'csv')}
-                            disabled={partialDownloading === `${product}:csv`}
-                            className="btn-secondary flex-1 text-center text-xs"
-                          >
-                            {partialDownloading === `${product}:csv` ? 'Downloading…' : 'CSV'}
-                          </button>
+              {/* Partial checkout downloads — only in-progress products (not yet merged) */}
+              {(() => {
+                if (run.status === 'completed') return null
+                const finishedSet = new Set(run.finished_products ?? [])
+                const inProgressProducts = run.products.filter((p) => !finishedSet.has(p))
+                if (inProgressProducts.length === 0) return null
+                return (
+                  <div>
+                    <p className="section-title flex items-center gap-1.5">Partial Checkout <HelpTooltip text="Download data for chunks that have already finished, even while the run is still in progress or has partially failed." /></p>
+                    <div className="flex flex-col gap-2">
+                      {inProgressProducts.map((product) => (
+                        <div key={product} className="card p-3">
+                          <p className="text-xs font-medium text-gray-700 mb-2">{product}</p>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handlePartialDownload(product, 'parquet')}
+                              disabled={partialDownloading === `${product}:parquet`}
+                              className="btn-primary flex-1 text-center text-xs"
+                            >
+                              {partialDownloading === `${product}:parquet` ? 'Downloading…' : 'GeoParquet'}
+                            </button>
+                            <button
+                              onClick={() => handlePartialDownload(product, 'csv')}
+                              disabled={partialDownloading === `${product}:csv`}
+                              className="btn-secondary flex-1 text-center text-xs"
+                            >
+                              {partialDownloading === `${product}:csv` ? 'Downloading…' : 'CSV'}
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                    {partialError && (
-                      <p className="text-xs text-red-600">{partialError}</p>
-                    )}
+                      ))}
+                      {partialError && (
+                        <p className="text-xs text-red-600">{partialError}</p>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
+                )
+              })()}
 
               {/* Run log */}
               {run.events.length > 0 && (
@@ -337,6 +455,8 @@ export default function ResultsPanel({ runId }: Props) {
                         const colour =
                           ev.level === 'job_error' || ev.level === 'error'
                             ? 'text-red-600'
+                            : ev.level === 'job_shelved'
+                            ? 'text-amber-600'
                             : ev.level === 'job_done'
                             ? 'text-green-600'
                             : ev.level === 'job_start'

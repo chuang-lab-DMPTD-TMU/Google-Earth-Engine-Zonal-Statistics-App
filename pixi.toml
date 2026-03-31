@@ -1,6 +1,6 @@
 [workspace]
 name = "gee-web-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "GEE zonal statistics web app"
 channels = ["conda-forge"]
 platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
@@ -8,11 +8,12 @@ platforms = ["linux-64", "osx-arm64", "osx-64", "win-64"]
 # ── Native / conda-forge dependencies ─────────────────────────────────────────
 [dependencies]
 python = "3.10.*"
+setuptools = "<71"   # pkg_resources removed from top-level in setuptools >=71
 gdal = "*"
 proj = "*"
 geopandas = ">=1.0"
 pyarrow = ">=15"
-duckdb = ">=0.10"
+duckdb = ">=1.5.0"
 graphviz = "*"
 nodejs = "20.*"
 
@@ -41,7 +42,7 @@ cmd = "powershell -NoProfile -Command \"Remove-Item -Recurse -Force -ErrorAction
 cwd = "frontend"
 
 [tasks.npm-install]
-cmd = "npm install"
+cmd = "npm install && npm audit fix"
 cwd = "frontend"
 
 [tasks.build-frontend]

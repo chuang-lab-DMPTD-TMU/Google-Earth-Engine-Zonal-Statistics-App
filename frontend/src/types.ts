@@ -2,6 +2,7 @@
 
 export type RunStatus =
   | 'running'
+  | 'paused'
   | 'completed'
   | 'failed'
   | 'stopped'
@@ -22,6 +23,8 @@ export interface RunDetail extends RunSummary {
   config: Record<string, unknown>
   job_counts: JobCounts
   events: RunEvent[]
+  gee_concurrency: number
+  finished_products: string[]
 }
 
 export interface JobCounts {
@@ -30,6 +33,7 @@ export interface JobCounts {
   failed: number
   running: number
   pending: number
+  shelved: number
 }
 
 export interface RunEvent {
@@ -90,4 +94,5 @@ export interface ProductConfig {
 export interface SubmitRunRequest {
   run_id: string
   products: ProductConfig[]
+  gee_concurrency?: number
 }

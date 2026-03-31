@@ -1,26 +1,26 @@
 import { MapContainer, TileLayer, GeoJSON, useMap } from 'react-leaflet'
 import { useEffect } from 'react'
-import * as L from 'leaflet'
 
+// bounds: [minx, miny, maxx, maxy] in EPSG:4326
 interface FitBoundsProps {
-  geojson: GeoJSON.FeatureCollection
+  bounds: [number, number, number, number]
 }
 
-function FitBounds({ geojson }: FitBoundsProps) {
+function FitBounds({ bounds }: FitBoundsProps) {
   const map = useMap()
   useEffect(() => {
-    const layer = L.geoJSON(geojson)
-    const bounds = layer.getBounds()
-    if (bounds.isValid()) map.fitBounds(bounds, { padding: [20, 20] })
-  }, [geojson, map])
+    const [minx, miny, maxx, maxy] = bounds
+    map.fitBounds([[miny, minx], [maxy, maxx]], { padding: [20, 20] })
+  }, [bounds, map])
   return null
 }
 
 interface Props {
   geojson: GeoJSON.FeatureCollection | null
+  bounds: [number, number, number, number] | null
 }
 
-export default function MapPreview({ geojson }: Props) {
+export default function MapPreview({ geojson, bounds }: Props) {
   return (
     <MapContainer
       center={[20, 0]}
@@ -32,14 +32,14 @@ export default function MapPreview({ geojson }: Props) {
         attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
       />
-      {geojson && (
+      {geojson && bounds && (
         <>
           <GeoJSON
-            key={JSON.stringify(geojson).slice(0, 80)}
+            key={`${bounds.join(',')}`}
             data={geojson}
             style={{ color: '#16a34a', weight: 2, fillOpacity: 0.15 }}
           />
-          <FitBounds geojson={geojson} />
+          <FitBounds bounds={bounds} />
         </>
       )}
     </MapContainer>

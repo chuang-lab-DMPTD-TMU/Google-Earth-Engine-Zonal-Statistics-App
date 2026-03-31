@@ -1,9 +1,6 @@
 """
 GEE Web App – FastAPI backend
 
-Replaces the Streamlit server layer from main.py while keeping all pipeline
-logic (Snakemake, DuckDB, worker scripts) identical.
-
 DB schema is intentionally compatible with main.py so both can share the same
 run_state.duckdb and resume runs started by either interface.
 """
@@ -20,6 +17,7 @@ import signal
 import string
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import uuid
@@ -49,7 +47,7 @@ GEE_KEY_PATH  = Path(
         "GOOGLE_APPLICATION_CREDENTIALS",
         str(Path(__file__).parent.parent / "config" / "gee-key.json"),
     )
-)
+).resolve()
 APP_DIR       = Path(__file__).parent.parent        # repo root
 SNAKEFILE     = APP_DIR / "Snakefile_parquet"
 LOG_HANDLER   = APP_DIR / "scripts" / "snakemake_log_handler.py"
@@ -145,7 +143,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
             "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
         },
         "label": "ESA WorldCover 2020 (v1.0)",
-        "description": "ESA WorldCover landcover classification v100 (10m, 2020).",
+        "description": "Aggregated to 500m - ESA WorldCover landcover classification v100 (10m, 2020).",
         "resolution_m": 10,
     },
     "WorldCover_v200": {
@@ -159,7 +157,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
             "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
         },
         "label": "ESA WorldCover 2021 (v2.0)",
-        "description": "ESA WorldCover landcover classification v200 (10m, 2021).",
+        "description": "Aggregated to 500m - ESA WorldCover landcover classification v200 (10m, 2021).",
         "resolution_m": 10,
     },
     "MODIS_LULC": {
@@ -179,6 +177,52 @@ PRODUCT_REGISTRY: dict[str, dict] = {
         "label": "MODIS Land Use / Land Cover",
         "description": "MODIS Land Cover Type (500m resolution, annual, multiple schemes).",
         "resolution_m": 500,
+    },
+    "NDBI": {
+        # No single ee_collection — worker uses multi_collections to build a merged NDBI series.
+        "ee_collection": None,
+        "multi_collections": [
+            {
+                # LT05 routine operations suspended 2011-11-18 after a power anomaly;
+                # no usable imagery after November 2011.
+                "id":         "LANDSAT/LT05/C02/T1_L2",
+                "date_start": "1984-01-01",
+                "date_end":   "2011-11-30",
+                "swir_band":  "SR_B5",
+                "nir_band":   "SR_B4",
+            },
+            {
+                # LE07 (SLC-off since 2003 but usable) bridges LT05 end to LC08 start.
+                "id":         "LANDSAT/LE07/C02/T1_L2",
+                "date_start": "2011-12-01",
+                "date_end":   "2013-04-10",
+                "swir_band":  "SR_B5",
+                "nir_band":   "SR_B4",
+            },
+            {
+                # LC08 first operational data: 2013-04-11.
+                "id":         "LANDSAT/LC08/C02/T1_L2",
+                "date_start": "2013-04-11",
+                "date_end":   "2025-12-31",
+                "swir_band":  "SR_B6",
+                "nir_band":   "SR_B5",
+            },
+        ],
+        "min_date": "1984-01-01",
+        "max_date": "2025-12-31",
+        "scale": 250,
+        "cadence": "composite",
+        "categorical": False,
+        "content": {
+            "NDBI": {"stats": ["mean", "median"], "default_stats": ["mean"]},
+        },
+        "label": "NDBI (Landsat 5 / 7 / 8)",
+        "description": (
+            "Aggregated to 250m - Normalized Difference Built-up Index (30m, per-scene). "
+            "Landsat 5 TM 1984–Nov 2011, Landsat 7 ETM+ (SLC-off) Dec 2011–Apr 2013, "
+            "Landsat 8 OLI Apr 2013–2025. Formula: (SWIR − NIR) / (SWIR + NIR)."
+        ),
+        "resolution_m": 30,
     },
 }
 
@@ -201,9 +245,18 @@ class ProductConfig(BaseModel):
     date_start: str   # YYYY-MM-DD
     date_end: str     # YYYY-MM-DD
 
+DEFAULT_GEE_CONCURRENCY = 2
+
 class SubmitRunRequest(BaseModel):
     run_id: str
     products: list[ProductConfig]
+    gee_concurrency: int = DEFAULT_GEE_CONCURRENCY
+
+class RetryRunRequest(BaseModel):
+    gee_concurrency: int | None = None  # None → keep stored value
+
+class ResumeRunRequest(BaseModel):
+    gee_concurrency: int | None = None  # None → SIGCONT with no change
 
 # ─── Time chunk helpers (mirrors main.py) ─────────────────────────────────────
 
@@ -328,11 +381,12 @@ def _upsert_run_status(run_id: str, record: dict):
         ])
 
 def _append_event(run_id: str, event_type: str, status: str, message: str = "", payload=None):
+    now = datetime.now(timezone.utc).isoformat()
     with _duckdb_connect() as conn:
         conn.execute("""
             INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json)
-            VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
-        """, [run_id, event_type, status, message, json.dumps(payload or {}, default=str)])
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, [now, run_id, event_type, status, message, json.dumps(payload or {}, default=str)])
 
 def _get_job_counts(run_id: str, meta: dict | None = None) -> dict:
     # Derive total/done from the filesystem — no DuckDB locking needed and always accurate.
@@ -351,21 +405,31 @@ def _get_job_counts(run_id: str, meta: dict | None = None) -> dict:
                 if (chunks_dir / prod / f"{band}_{chunk}.parquet").exists():
                     done += 1
 
-    # Best-effort: get running/failed counts from DuckDB for richer status display.
+    # running/failed come from DuckDB, but are only trustworthy while Snakemake is
+    # actively running.  When the process is gone the log handler can't update them,
+    # so we zero them out and let the filesystem-based done/total drive the display.
+    raw_status = meta.get("status", "unknown") if meta else "unknown"
+    is_active = raw_status in ("running", "paused") and _is_pid_alive(meta.get("snakemake_pid") if meta else None)
+
     try:
         with _duckdb_connect() as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) FROM jobs WHERE run_id=? AND status IN ('running','failed') GROUP BY status",
                 [run_id],
             ).fetchall()
+            shelved = int(conn.execute(
+                "SELECT COUNT(*) FROM run_events WHERE run_id=? AND event_type='job_shelved'",
+                [run_id],
+            ).fetchone()[0])
         db_counts = {r[0]: int(r[1]) for r in rows}
     except Exception:
         db_counts = {}
+        shelved = 0
 
-    running = db_counts.get("running", 0)
-    failed  = db_counts.get("failed",  0)
+    running = db_counts.get("running", 0) if is_active else 0
+    failed  = db_counts.get("failed",  0) if is_active else 0
     pending = max(0, total - done - running - failed)
-    return {"total": total, "done": done, "failed": failed, "running": running, "pending": pending}
+    return {"total": total, "done": done, "failed": failed, "running": running, "pending": pending, "shelved": shelved}
 
 def _initialise_jobs(run_id: str, payload: dict):
     """Pre-populate the jobs table (mirrors main.py initialise_jobs)."""
@@ -386,8 +450,8 @@ def _initialise_jobs(run_id: str, payload: dict):
             INSERT INTO jobs (run_id, product, band, time_chunk, status) VALUES (?,?,?,?,?)
             ON CONFLICT (run_id, product, band, time_chunk) DO UPDATE SET
                 status = CASE
-                    WHEN jobs.status = 'done'   THEN 'done'
-                    WHEN jobs.status = 'failed' THEN jobs.status
+                    WHEN excluded.status = 'done' THEN 'done'
+                    WHEN jobs.status = 'done'     THEN 'done'
                     ELSE excluded.status
                 END
         """, rows)
@@ -412,7 +476,7 @@ def _update_registry(run_id: str, payload: dict, status: str,
                      config_hash: str | None = None,
                      error_message: str | None = None,
                      bump_attempt: bool = False):
-    now      = datetime.utcnow().isoformat()
+    now      = datetime.now(timezone.utc).isoformat()
     existing = _load_yaml(run_id) or {}
     attempts = existing.get("attempts", 0)
     if bump_attempt:
@@ -449,6 +513,8 @@ def _update_registry(run_id: str, payload: dict, status: str,
         "completed": "Run completed successfully",
         "failed":    f"Run failed{': ' + error_message if error_message else ''}",
         "stopped":   "Run stopped by user",
+        "paused":    "Run paused by user",
+        "resumed":   "Run resumed by user",
     }
     _append_event(run_id, "status_change", status, messages.get(status, status))
 
@@ -457,7 +523,7 @@ def _set_execution_meta(run_id: str, pid: int, log_path: str, config_path: str):
     existing["snakemake_pid"]          = pid
     existing["snakemake_log_path"]     = log_path
     existing["snakemake_config_path"]  = config_path
-    existing["updated_at"]             = datetime.utcnow().isoformat()
+    existing["updated_at"]             = datetime.now(timezone.utc).isoformat()
     _save_yaml(run_id, existing)
     _upsert_run_status(run_id, existing)
     _append_event(run_id, "pipeline_started", existing.get("status", "running"),
@@ -465,10 +531,31 @@ def _set_execution_meta(run_id: str, pid: int, log_path: str, config_path: str):
 
 def _list_saved_runs() -> list[dict]:
     runs = []
+    seen: set[str] = set()
     for p in sorted(RUNS_DIR.glob("*/run.yaml"), key=lambda x: x.stat().st_mtime, reverse=True):
         m = _load_yaml(p.parent.name)
         if m:
             runs.append(m)
+            seen.add(p.parent.name)
+
+    # Include runs that exist only in the DuckDB (no run.yaml on disk)
+    try:
+        with _duckdb_connect() as conn:
+            rows = conn.execute(
+                "SELECT run_id, status, created_at, updated_at FROM run_status ORDER BY created_at DESC"
+            ).fetchall()
+        for run_id, status, created_at, updated_at in rows:
+            if run_id not in seen:
+                runs.append({
+                    "run_id":     run_id,
+                    "status":     status,
+                    "created_at": _ts_utc(created_at) if created_at else "",
+                    "updated_at": _ts_utc(updated_at) if updated_at else "",
+                    "payload":    {},
+                })
+    except Exception:
+        pass
+
     return runs
 
 # ─── Process helpers ──────────────────────────────────────────────────────────
@@ -503,15 +590,122 @@ def _get_descendants(root_pid: int) -> list[int]:
         stack.extend(ch)
     return descendants
 
+def _signal_process_tree(root_pid: int, sig: int):
+    """Send signal to root PID and all its descendants."""
+    for child in _get_descendants(root_pid):
+        try:
+            os.kill(child, sig)
+        except Exception:
+            pass
+    try:
+        os.kill(root_pid, sig)
+    except Exception:
+        pass
+
+
+def _filter_snakemake_output(proc: subprocess.Popen, log_path: Path):
+    """Copy Snakemake output to log_path, suppressing the detail block for
+    merge_product_parquet (input/output/jobid/reason/etc.) while keeping the
+    rule header line itself."""
+    try:
+        with open(log_path, "a") as f:
+            skip_block = False
+            for line in proc.stdout:
+                if line.rstrip() == "rule merge_product_parquet:":
+                    f.write(line)
+                    f.flush()
+                    skip_block = True
+                    continue
+                if skip_block:
+                    if line.strip() == "":
+                        skip_block = False
+                    continue
+                f.write(line)
+                f.flush()
+    except Exception:
+        pass
+
+
+def _launch_snakemake(run_id: str, payload: dict, log_path: Path) -> subprocess.Popen:
+    """Start Snakemake for run_id. gee_concurrency is read from payload."""
+    run_dir     = RUNS_DIR / run_id
+    cfg_path    = CONFIG_DIR / f"config_{uuid.uuid4().hex[:8]}.yaml"
+    cfg_path.write_text(yaml.safe_dump(payload, sort_keys=False))
+
+    try:
+        subprocess.run(
+            ["python", "-m", "snakemake", "--unlock", "--snakefile", str(SNAKEFILE),
+             "--directory", str(run_dir)],
+            capture_output=True, text=True, timeout=30, cwd=str(run_dir),
+        )
+    except Exception:
+        pass
+
+    gee_concurrency = int(payload.get("gee_concurrency", DEFAULT_GEE_CONCURRENCY))
+    env = {
+        **os.environ,
+        "GOOGLE_APPLICATION_CREDENTIALS": str(GEE_KEY_PATH),
+        "GEE_RUN_ID":  run_id,
+        "GEE_DB_PATH": str(RUN_DB_PATH),
+        "HOME": "/tmp",
+        "PYTHONWARNINGS": "ignore",
+    }
+    cmd = [
+        "python", "-W", "ignore::FutureWarning",
+        "-m", "snakemake",
+        "--snakefile",           str(SNAKEFILE),
+        "--configfile",          str(cfg_path),
+        "--directory",           str(run_dir),
+        "-j",                    "12",
+        "--resources",           f"gee={gee_concurrency}",
+        "--rerun-incomplete",
+        "--keep-going",
+        "--log-handler-script",  str(LOG_HANDLER),
+    ]
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, close_fds=True, env=env, cwd=str(run_dir),
+    )
+    threading.Thread(
+        target=_filter_snakemake_output, args=(proc, log_path), daemon=True
+    ).start()
+    _set_execution_meta(run_id, proc.pid, str(log_path), str(cfg_path))
+    return proc
+
+
 def _resolve_status(meta: dict | None) -> str:
     if meta is None:
         return "unknown"
     status = meta.get("status", "unknown")
+    if status == "paused":
+        pid = meta.get("snakemake_pid")
+        if not _is_pid_alive(pid):
+            run_id = meta.get("run_id")
+            if run_id:
+                _update_registry(run_id, meta.get("payload") or {}, status="failed",
+                                 error_message="Process exited while paused")
+            return "failed"
+        return "paused"
     if status == "running":
         pid = meta.get("snakemake_pid")
         if pid is None:
-            # PID not yet written — submission/retry is still in flight, keep "running"
-            return "running"
+            # PID not yet written — could still be in-flight, but if it's been
+            # more than 60 s since launch the process almost certainly died before
+            # it could write its PID (e.g. server restart).
+            started = meta.get("last_started_at")
+            if started:
+                try:
+                    age = (datetime.now(timezone.utc) - datetime.fromisoformat(started)).total_seconds()
+                    if age < 60:
+                        return "running"
+                except Exception:
+                    pass
+            # No timestamp or too old — treat as failed so it doesn't block new submissions.
+            run_id = meta.get("run_id")
+            if run_id:
+                _update_registry(run_id, meta.get("payload") or {}, status="failed",
+                                 error_message="Run process exited before PID was recorded")
+            return "failed"
         if not _is_pid_alive(pid):
             # Process is gone — infer final status from jobs table.
             # pid was set so there's no retry race condition; safe to persist.
@@ -551,6 +745,16 @@ def _list_result_products(run_id: str) -> list[str]:
         return []
     return [p.name for p in rdir.iterdir() if p.is_dir() and p.name != "partial_checkout"]
 
+def _list_finished_products(run_id: str) -> list[str]:
+    """Products that have a merged parquet in results/<prod>/ (i.e. merge is complete)."""
+    rdir = _results_dir(run_id)
+    if not rdir.exists():
+        return []
+    return [
+        p.name for p in rdir.iterdir()
+        if p.is_dir() and p.name != "partial_checkout" and any(p.glob("*.parquet"))
+    ]
+
 def _find_product_parquet(run_id: str, product: str) -> Path:
     rdir  = _results_dir(run_id) / product
     files = sorted(rdir.glob("*.parquet")) if rdir.exists() else []
@@ -570,12 +774,30 @@ def _run_to_summary(meta: dict) -> dict:
         "aoi_name":   payload.get("aoi_name", ""),
     }
 
+def _ts_utc(ts) -> str:
+    """Normalise any timestamp value to an ISO-8601 string with explicit UTC marker.
+
+    Sources arrive in three formats:
+      - DuckDB TIMESTAMP object  →  naive datetime (UTC internally)
+      - datetime.utcfromtimestamp().isoformat()  →  'YYYY-MM-DDTHH:MM:SS' (no tz)
+      - datetime.now(utc).isoformat()  →  '...+00:00'  (already correct)
+
+    Without an explicit timezone marker JavaScript's Date() treats the string as
+    *local* time, causing an offset against Snakemake's local-time log entries.
+    """
+    s = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+    s = s.replace(" ", "T")          # DuckDB uses space separator
+    if not (s.endswith("Z") or "+" in s[10:]):
+        s += "Z"
+    return s
+
+
 def _run_to_detail(run_id: str, meta: dict) -> dict:
     payload = meta.get("payload", {}) or {}
     try:
         with _duckdb_connect() as conn:
             status_events = conn.execute(
-                """SELECT event_time, event_type, message
+                """SELECT event_time, event_type, message, payload_json
                    FROM run_events WHERE run_id=? ORDER BY event_time""",
                 [run_id],
             ).fetchall()
@@ -590,26 +812,38 @@ def _run_to_detail(run_id: str, meta: dict) -> dict:
     except Exception:
         status_events, job_events = [], []
 
-    # Merge status events and job events into a single timeline
+    # Merge status events into timeline and build shelved set in one pass.
     merged = []
-    for ts, evtype, msg in status_events:
-        merged.append({"ts": str(ts), "level": evtype, "msg": msg or evtype})
+    shelved_chunks: set[tuple] = set()
+    for ts, evtype, msg, payload_json in status_events:
+        merged.append({"ts": _ts_utc(ts), "level": evtype, "msg": msg or evtype})
+        if evtype == "job_shelved":
+            try:
+                d = json.loads(payload_json or "{}")
+                shelved_chunks.add((d["prod"], d["band"], d["chunk"]))
+            except Exception:
+                pass
 
     # Track which jobs already have a DB-sourced finished event to avoid duplicates
     db_finished: set[tuple] = set()
     for started, finished, prod, band, chunk, jstatus, error in job_events:
         if started:
             merged.append({
-                "ts":    str(started),
+                "ts":    _ts_utc(started),
                 "level": "job_start",
                 "msg":   f"Started {prod}/{band} [{chunk}]",
             })
         if finished:
-            level = "job_done" if jstatus == "done" else "job_error"
-            msg   = f"{'Finished' if jstatus == 'done' else 'Failed'} {prod}/{band} [{chunk}]"
-            if error:
-                msg += f": {error}"
-            merged.append({"ts": str(finished), "level": level, "msg": msg})
+            is_shelved = (prod, band, chunk) in shelved_chunks
+            if is_shelved:
+                # The job_shelved run_event carries the real message; skip a duplicate done entry.
+                pass
+            else:
+                level = "job_done" if jstatus == "done" else "job_error"
+                msg   = f"{'Finished' if jstatus == 'done' else 'Failed'} {prod}/{band} [{chunk}]"
+                if error:
+                    msg += f": {error}"
+                merged.append({"ts": _ts_utc(finished), "level": level, "msg": msg})
             db_finished.add((prod, band, chunk))
 
     # Fill in finished events from the filesystem for jobs the log handler missed.
@@ -622,10 +856,12 @@ def _run_to_detail(run_id: str, meta: dict) -> dict:
             for chunk in cfg.get("time_chunks", []):
                 if (prod, band, chunk) in db_finished:
                     continue
+                if (prod, band, chunk) in shelved_chunks:
+                    continue
                 parquet = chunks_dir / prod / f"{band}_{chunk}.parquet"
                 if parquet.exists():
                     mtime = parquet.stat().st_mtime
-                    ts    = datetime.utcfromtimestamp(mtime).isoformat()
+                    ts    = _ts_utc(datetime.utcfromtimestamp(mtime))
                     merged.append({
                         "ts":    ts,
                         "level": "job_done",
@@ -648,7 +884,7 @@ def _run_to_detail(run_id: str, meta: dict) -> dict:
             if parquet_files:
                 newest = max(parquet_files, key=lambda p: p.stat().st_mtime)
                 mtime  = newest.stat().st_mtime
-                ts     = datetime.utcfromtimestamp(mtime).isoformat()
+                ts     = _ts_utc(datetime.utcfromtimestamp(mtime))
                 merged.append({
                     "ts":    ts,
                     "level": "job_done",
@@ -659,11 +895,13 @@ def _run_to_detail(run_id: str, meta: dict) -> dict:
 
     return {
         **_run_to_summary(meta),
-        "pid":        meta.get("snakemake_pid"),
-        "run_dir":    str(RUNS_DIR / run_id),
-        "config":     payload,
-        "job_counts": _get_job_counts(run_id, meta),
-        "events":     merged,
+        "pid":             meta.get("snakemake_pid"),
+        "run_dir":         str(RUNS_DIR / run_id),
+        "config":          payload,
+        "job_counts":        _get_job_counts(run_id, meta),
+        "events":            merged,
+        "gee_concurrency":   int(payload.get("gee_concurrency", DEFAULT_GEE_CONCURRENCY)),
+        "finished_products": _list_finished_products(run_id),
     }
 
 # ─── Routes: GEE key ─────────────────────────────────────────────────────────
@@ -733,7 +971,7 @@ def list_events(limit: int = 50):
     except Exception:
         rows = []
     return [
-        {"ts": str(ts), "run_id": run_id, "level": evtype, "msg": msg}
+        {"ts": _ts_utc(ts), "run_id": run_id, "level": evtype, "msg": msg}
         for ts, run_id, evtype, msg in rows
     ]
 
@@ -787,25 +1025,26 @@ def submit_run(body: SubmitRunRequest):
         dt_end     = dt_end.replace(day=calendar.monthrange(dt_end.year, dt_end.month)[1])
 
         product_tasks[pc.product] = {
-            "ee_collection": info["ee_collection"],
-            "bands":         pc.bands,
-            "statistics":    pc.stats,       # Snakefile uses "statistics"
-            "scale":         info["scale"],
-            "cadence":       cadence,
-            "categorical":   info["categorical"],
-            "start_date":    pc.date_start,
-            "end_date":      dt_end.strftime("%Y-%m-%d"),
-            "time_chunks":   time_chunks,
+            "ee_collection":    info.get("ee_collection"),
+            "multi_collections": info.get("multi_collections"),
+            "bands":            pc.bands,
+            "statistics":       pc.stats,       # Snakefile uses "statistics"
+            "scale":            info["scale"],
+            "cadence":          cadence,
+            "categorical":      info["categorical"],
+            "start_date":       pc.date_start,
+            "end_date":         dt_end.strftime("%Y-%m-%d"),
+            "time_chunks":      time_chunks,
         }
 
     payload = {
-        "run_id":               run_id,
-        "shp_path":             str(aoi_file),
-        "products":             product_tasks,
-        "output_dir":           str(_results_dir(run_id)),
-        "chain_parallel_window": 3,
-        "aoi_name":             aoi_file.name,
-        "app_dir":              str(APP_DIR),
+        "run_id":                run_id,
+        "shp_path":              str(aoi_file),
+        "products":              product_tasks,
+        "output_dir":            str(_results_dir(run_id)),
+        "aoi_name":              aoi_file.name,
+        "app_dir":               str(APP_DIR),
+        "gee_concurrency":       max(1, body.gee_concurrency),
     }
 
     # Register run (status=queued → running)
@@ -815,56 +1054,13 @@ def submit_run(body: SubmitRunRequest):
     # Pre-populate jobs table so progress bar works immediately
     _initialise_jobs(run_id, payload)
 
-    # Write Snakemake config YAML
-    cfg_path = CONFIG_DIR / f"config_{uuid.uuid4().hex[:8]}.yaml"
-    cfg_path.write_text(yaml.safe_dump(payload, sort_keys=False))
-
-    # Unlock any stale Snakemake lock (safe only when no other pipeline is running)
-    try:
-        subprocess.run(
-            ["snakemake", "--unlock", "--snakefile", str(SNAKEFILE),
-             "--directory", str(run_dir)],
-            capture_output=True, text=True, timeout=10, cwd=str(run_dir),
-        )
-    except Exception:
-        pass
-
-    # Snakemake log path
     log_dir  = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "snakemake_run.log"
     with open(log_path, "a") as lh:
-        lh.write(f"\n[{datetime.utcnow().isoformat()}] API submit\n")
+        lh.write(f"\n[{datetime.now(timezone.utc).isoformat()}] API submit\n")
 
-    # Launch Snakemake
-    env = {
-        **os.environ,
-        "GOOGLE_APPLICATION_CREDENTIALS": str(GEE_KEY_PATH),
-        "GEE_RUN_ID":  run_id,
-        "GEE_DB_PATH": str(RUN_DB_PATH),
-        "HOME": "/tmp",
-    }
-    cmd = [
-        "snakemake",
-        "--snakefile",           str(SNAKEFILE),
-        "--configfile",          str(cfg_path),
-        "--directory",           str(run_dir),
-        "-j",                    "12",
-        "--resources",           "gee=3",
-        "--rerun-incomplete",
-        "--keep-going",
-        "--log-handler-script",  str(LOG_HANDLER),
-    ]
-    log_handle = open(log_path, "a")
-    proc = subprocess.Popen(
-        cmd, stdout=log_handle, stderr=subprocess.STDOUT,
-        text=True, close_fds=True, env=env, cwd=str(run_dir),
-    )
-    log_handle.close()
-
-    _set_execution_meta(run_id, proc.pid, str(log_path), str(cfg_path))
-
-    # Return current run detail
+    _launch_snakemake(run_id, payload, log_path)
     return _run_to_detail(run_id, _load_yaml(run_id) or {})
 
 @app.delete("/api/runs/{run_id}")
@@ -899,14 +1095,106 @@ def stop_run(run_id: str):
                      error_message="Stopped by user from React UI.")
     return {"ok": True}
 
-@app.post("/api/runs/{run_id}/retry")
-def retry_run(run_id: str):
+@app.post("/api/runs/{run_id}/pause")
+def pause_run(run_id: str):
+    meta = _load_yaml(run_id)
+    if meta is None:
+        raise HTTPException(404, "Run not found")
+    if _resolve_status(meta) != "running":
+        raise HTTPException(409, "Run is not currently running.")
+
+    pid = meta.get("snakemake_pid")
+    if pid and _is_pid_alive(int(pid)):
+        _signal_process_tree(int(pid), signal.SIGSTOP)
+
+    payload = meta.get("payload", {})
+    _update_registry(run_id, payload, status="paused")
+    return {"ok": True}
+
+
+@app.post("/api/runs/{run_id}/resume")
+def resume_run(run_id: str, body: ResumeRunRequest = ResumeRunRequest()):
+    meta = _load_yaml(run_id)
+    if meta is None:
+        raise HTTPException(404, "Run not found")
+    if _resolve_status(meta) != "paused":
+        raise HTTPException(409, "Run is not currently paused.")
+
+    pid     = meta.get("snakemake_pid")
+    payload = dict(meta.get("payload") or {})
+
+    stored_concurrency = int(payload.get("gee_concurrency", DEFAULT_GEE_CONCURRENCY))
+    new_concurrency    = max(1, body.gee_concurrency) if body.gee_concurrency is not None else None
+    changing           = new_concurrency is not None and new_concurrency != stored_concurrency
+
+    if changing:
+        # Kill the frozen process tree and restart with the new concurrency.
+        payload["gee_concurrency"] = new_concurrency
+        if pid and _is_pid_alive(int(pid)):
+            _signal_process_tree(int(pid), signal.SIGCONT)   # unfreeze first so SIGTERM is handled
+            time.sleep(0.2)
+            _signal_process_tree(int(pid), signal.SIGTERM)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and _is_pid_alive(int(pid)):
+                time.sleep(0.1)
+            if _is_pid_alive(int(pid)):
+                _signal_process_tree(int(pid), signal.SIGKILL)
+
+        run_dir  = RUNS_DIR / run_id
+        log_dir  = run_dir / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "snakemake_run.log"
+        with open(log_path, "a") as lh:
+            lh.write(f"\n[{datetime.now(timezone.utc).isoformat()}] API resume (new gee={new_concurrency})\n")
+        _update_registry(run_id, payload, status="running", bump_attempt=True)
+        _launch_snakemake(run_id, payload, log_path)
+    else:
+        # Simple SIGCONT — resume exactly where we left off.
+        # Do NOT call _update_registry here: it would clear snakemake_pid (by design
+        # for restarts) and _resolve_status would then flip the run to "failed" after
+        # the 60 s grace period. Instead, patch only the status field in-place.
+        if pid and _is_pid_alive(int(pid)):
+            _signal_process_tree(int(pid), signal.SIGCONT)
+        existing = _load_yaml(run_id) or {}
+        existing["status"]     = "running"
+        existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _save_yaml(run_id, existing)
+        _upsert_run_status(run_id, existing)
+        _append_event(run_id, "status_change", "running", "Run resumed by user")
+
+    return _run_to_detail(run_id, _load_yaml(run_id) or {})
+
+
+@app.post("/api/runs/{run_id}/reset")
+def reset_run(run_id: str):
+    """Delete all generated outputs for a run, preserving run.yaml and inputs/."""
     meta = _load_yaml(run_id)
     if meta is None:
         raise HTTPException(404, "Run not found")
 
     if _resolve_status(meta) == "running":
-        raise HTTPException(409, "Run is already running.")
+        raise HTTPException(409, "Stop the run before resetting it.")
+
+    run_dir = RUNS_DIR / run_id
+    import shutil
+    for subdir in ("intermediate", "results", "logs", ".snakemake"):
+        target = run_dir / subdir
+        if target.exists():
+            shutil.rmtree(target)
+
+    payload = meta.get("payload", {})
+    _update_registry(run_id, payload, status="stopped",
+                     error_message="Reset by user.")
+    return {"ok": True}
+
+@app.post("/api/runs/{run_id}/retry")
+def retry_run(run_id: str, body: RetryRunRequest = RetryRunRequest()):
+    meta = _load_yaml(run_id)
+    if meta is None:
+        raise HTTPException(404, "Run not found")
+
+    if _resolve_status(meta) in ("running", "paused"):
+        raise HTTPException(409, "Run is already active. Stop or pause before retrying.")
 
     active = next(
         (m for m in _list_saved_runs()
@@ -916,54 +1204,19 @@ def retry_run(run_id: str):
     if active:
         raise HTTPException(409, f"Run '{active['run_id']}' is already running.")
 
-    payload = meta.get("payload") or {}
-    cfg_path = CONFIG_DIR / f"config_{uuid.uuid4().hex[:8]}.yaml"
-    cfg_path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    payload = dict(meta.get("payload") or {})
+    if body.gee_concurrency is not None:
+        payload["gee_concurrency"] = max(1, body.gee_concurrency)
 
     run_dir  = RUNS_DIR / run_id
     log_dir  = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "snakemake_run.log"
     with open(log_path, "a") as lh:
-        lh.write(f"\n[{datetime.utcnow().isoformat()}] API retry\n")
-
-    try:
-        subprocess.run(
-            ["snakemake", "--unlock", "--snakefile", str(SNAKEFILE),
-             "--directory", str(run_dir)],
-            capture_output=True, text=True, timeout=10, cwd=str(run_dir),
-        )
-    except Exception:
-        pass
-
-    env = {
-        **os.environ,
-        "GOOGLE_APPLICATION_CREDENTIALS": str(GEE_KEY_PATH),
-        "GEE_RUN_ID":  run_id,
-        "GEE_DB_PATH": str(RUN_DB_PATH),
-        "HOME": "/tmp",
-    }
-    cmd = [
-        "snakemake",
-        "--snakefile",           str(SNAKEFILE),
-        "--configfile",          str(cfg_path),
-        "--directory",           str(run_dir),
-        "-j",                    "12",
-        "--resources",           "gee=3",
-        "--rerun-incomplete",
-        "--keep-going",
-        "--log-handler-script",  str(LOG_HANDLER),
-    ]
-    log_handle = open(log_path, "a")
-    proc = subprocess.Popen(
-        cmd, stdout=log_handle, stderr=subprocess.STDOUT,
-        text=True, close_fds=True, env=env, cwd=str(run_dir),
-    )
-    log_handle.close()
+        lh.write(f"\n[{datetime.now(timezone.utc).isoformat()}] API retry\n")
 
     _update_registry(run_id, payload, status="running", bump_attempt=True)
-    _set_execution_meta(run_id, proc.pid, str(log_path), str(cfg_path))
-
+    _launch_snakemake(run_id, payload, log_path)
     return _run_to_detail(run_id, _load_yaml(run_id) or {})
 
 @app.get("/api/runs/{run_id}/log")
@@ -977,12 +1230,15 @@ def get_run_log(run_id: str, lines: int = 100):
 
 @app.post("/api/runs/{run_id}/partial")
 def trigger_partial(run_id: str):
-    script = APP_DIR / "scripts" / "build_partial.py"
-    subprocess.Popen(
-        [sys.executable, str(script), run_id, str(RUNS_DIR)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    script   = APP_DIR / "scripts" / "build_partial.py"
+    log_path = RUNS_DIR / run_id / "logs" / "build_partial.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "a") as log_fh:
+        subprocess.Popen(
+            [sys.executable, str(script), run_id, str(RUNS_DIR)],
+            stdout=log_fh,
+            stderr=log_fh,
+        )
     return {"ok": True}
 
 def _sanitize_filename(filename: str) -> str:
@@ -1006,8 +1262,49 @@ def _safe_extract_zip(zf: zipfile.ZipFile, destination: Path):
 
 # ─── Routes: AOI upload ───────────────────────────────────────────────────────
 
+def _process_aoi(content: bytes, ext: str, dest: Path, input_dir: Path):
+    if ext == ".zip":
+        with tempfile.TemporaryDirectory() as tmp:
+            zp = Path(tmp) / "aoi.zip"
+            zp.write_bytes(content)
+            with zipfile.ZipFile(zp) as zf:
+                zf.extractall(tmp)
+            shp_files = list(Path(tmp).glob("**/*.shp"))
+            if not shp_files:
+                raise HTTPException(400, "No .shp found in zip")
+            # Also extract into input_dir for persistence
+            with zipfile.ZipFile(dest) as zf:
+                _safe_extract_zip(zf, input_dir)
+            gdf = gpd.read_file(shp_files[0])
+    elif ext in (".geojson", ".json"):
+        gdf = gpd.read_file(io.BytesIO(content))
+    elif ext in (".parquet", ".geoparquet"):
+        gdf = gpd.read_parquet(io.BytesIO(content))
+    else:
+        raise HTTPException(400, f"Unsupported file type: {ext}")
+
+    if gdf.empty or gdf.geometry.isna().all():
+        raise HTTPException(400, "AOI contains no valid geometries")
+
+    gdf_4326 = gdf.to_crs(epsg=4326)
+    bounds   = gdf_4326.total_bounds.tolist()
+    # Simplify preview geometry so serialisation is fast even for complex files.
+    # tolerance=0.001° ≈ 100m — fine enough for a map thumbnail.
+    preview_gdf = gdf_4326.head(200).copy()
+    preview_gdf["geometry"] = preview_gdf.geometry.simplify(0.001, preserve_topology=True)
+    preview  = json.loads(preview_gdf.to_json())
+
+    return {
+        "feature_count":   len(gdf),
+        "crs":             str(gdf.crs),
+        "bounds":          bounds,
+        "geojson_preview": preview,
+    }
+
+
 @app.post("/api/runs/{run_id}/aoi")
 async def upload_aoi(run_id: str, file: UploadFile = File(...)):
+    import asyncio
     run_id    = re.sub(r"[^A-Za-z0-9]", "", run_id)[:40]
     run_dir   = RUNS_DIR / run_id
     input_dir = run_dir / "inputs"
@@ -1020,43 +1317,14 @@ async def upload_aoi(run_id: str, file: UploadFile = File(...)):
     dest.write_bytes(content)
 
     try:
-        if ext == ".zip":
-            with tempfile.TemporaryDirectory() as tmp:
-                zp = Path(tmp) / "aoi.zip"
-                zp.write_bytes(content)
-                with zipfile.ZipFile(zp) as zf:
-                    zf.extractall(tmp)
-                shp_files = list(Path(tmp).glob("**/*.shp"))
-                if not shp_files:
-                    raise HTTPException(400, "No .shp found in zip")
-                # Also extract into input_dir for persistence
-                with zipfile.ZipFile(dest) as zf:
-                    _safe_extract_zip(zf, input_dir)
-                gdf = gpd.read_file(shp_files[0])
-        elif ext in (".geojson", ".json"):
-            gdf = gpd.read_file(io.BytesIO(content))
-        elif ext in (".parquet", ".geoparquet"):
-            gdf = gpd.read_parquet(io.BytesIO(content))
-        else:
-            raise HTTPException(400, f"Unsupported file type: {ext}")
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _process_aoi, content, ext, dest, input_dir)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(400, f"Failed to read AOI: {e}")
 
-    if gdf.empty or gdf.geometry.isna().all():
-        raise HTTPException(400, "AOI contains no valid geometries")
-
-    gdf_4326 = gdf.to_crs(epsg=4326)
-    bounds   = gdf_4326.total_bounds.tolist()
-    preview  = json.loads(gdf_4326.head(200).to_json())
-
-    return {
-        "feature_count":   len(gdf),
-        "crs":             str(gdf.crs),
-        "bounds":          bounds,
-        "geojson_preview": preview,
-    }
+    return result
 
 # ─── Routes: Downloads ────────────────────────────────────────────────────────
 

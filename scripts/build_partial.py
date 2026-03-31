@@ -11,6 +11,7 @@ import sys
 import re
 import json
 import duckdb
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -19,11 +20,12 @@ def _log_event(runs_dir: Path, run_id: str, message: str):
     if not db_path.exists():
         return
     try:
+        now = datetime.now(timezone.utc).isoformat()
         with duckdb.connect(str(db_path)) as conn:
             conn.execute(
                 """INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json)
-                   VALUES (CURRENT_TIMESTAMP, ?, 'info', 'info', ?, ?)""",
-                [run_id, message, json.dumps({})],
+                   VALUES (?, ?, 'info', 'info', ?, ?)""",
+                [now, run_id, message, json.dumps({})],
             )
     except Exception:
         pass
@@ -34,60 +36,44 @@ def sql_quote_ident(identifier: str) -> str:
 
 
 def merge_parquet_chunks_to_output(chunk_files, output_file: Path):
-    """Merge chunk parquet files into one parquet file using key-based joins."""
+    """Merge chunk parquet files into one parquet file using UNION ALL with NULL-padding."""
     if not chunk_files:
         return False
 
     conn = duckdb.connect(":memory:")
     try:
-        conn.execute("CREATE TABLE chunk_0 AS SELECT * FROM read_parquet(?)", [str(chunk_files[0])])
-        first_cols = [row[1] for row in conn.execute("PRAGMA table_info('chunk_0')").fetchall()]
+        try:
+            conn.execute("LOAD spatial;")
+        except Exception:
+            pass
 
-        join_candidates = ["region_id", "Date", "geom", "geometry"]
-        fallback_union = False
-
-        for idx, chunk_path in enumerate(chunk_files[1:], start=1):
+        # Load all chunks and collect their column sets.
+        chunk_cols_list = []
+        for idx, chunk_path in enumerate(chunk_files):
             conn.execute(f"CREATE TABLE chunk_{idx} AS SELECT * FROM read_parquet(?)", [str(chunk_path)])
-            chunk_cols = [row[1] for row in conn.execute(f"PRAGMA table_info('chunk_{idx}')").fetchall()]
-            common_keys = [k for k in join_candidates if k in first_cols and k in chunk_cols]
-            if not common_keys:
-                fallback_union = True
-                break
+            cols = [row[1] for row in conn.execute(f"PRAGMA table_info('chunk_{idx}')").fetchall()]
+            chunk_cols_list.append(cols)
 
-        if fallback_union:
-            union_query = " UNION ALL ".join(
-                [f"SELECT * FROM chunk_{idx}" for idx in range(len(chunk_files))]
-            )
-            conn.execute(f"CREATE TABLE merged AS {union_query}")
-        else:
-            select_items = [f"base.{sql_quote_ident(col)}" for col in first_cols]
-            join_clauses = []
-            seen_cols = set(first_cols)
+        # Build the ordered union of all column names (preserve first-seen order).
+        seen: set = set()
+        all_col_names: list = []
+        for cols in chunk_cols_list:
+            for c in cols:
+                if c not in seen:
+                    all_col_names.append(c)
+                    seen.add(c)
 
-            for idx in range(1, len(chunk_files)):
-                chunk_cols = [row[1] for row in conn.execute(f"PRAGMA table_info('chunk_{idx}')").fetchall()]
-                common_keys = [k for k in join_candidates if k in seen_cols and k in chunk_cols]
-                new_cols = [c for c in chunk_cols if c not in seen_cols and c not in common_keys]
+        # UNION ALL with NULL-fill so no band's data is lost even when schemas differ.
+        union_parts = []
+        for idx, cols in enumerate(chunk_cols_list):
+            col_set = set(cols)
+            exprs = [
+                sql_quote_ident(c) if c in col_set else f"NULL AS {sql_quote_ident(c)}"
+                for c in all_col_names
+            ]
+            union_parts.append(f"SELECT {', '.join(exprs)} FROM chunk_{idx}")
 
-                if not common_keys:
-                    continue
-
-                on_clause = " AND ".join(
-                    [f"base.{sql_quote_ident(k)} = c{idx}.{sql_quote_ident(k)}" for k in common_keys]
-                )
-                join_clauses.append(f"LEFT JOIN chunk_{idx} c{idx} ON {on_clause}")
-
-                for col in new_cols:
-                    select_items.append(f"c{idx}.{sql_quote_ident(col)}")
-                    seen_cols.add(col)
-
-            merge_query = (
-                "CREATE TABLE merged AS SELECT "
-                + ", ".join(select_items)
-                + " FROM chunk_0 base "
-                + " ".join(join_clauses)
-            )
-            conn.execute(merge_query)
+        conn.execute(f"CREATE TABLE merged AS {' UNION ALL '.join(union_parts)}")
 
         sort_cols = []
         merged_cols = [row[1] for row in conn.execute("PRAGMA table_info('merged')").fetchall()]

@@ -3,6 +3,15 @@ export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
     extend: {
+      keyframes: {
+        indeterminate: {
+          '0%':   { transform: 'translateX(-100%)' },
+          '100%': { transform: 'translateX(300%)' },
+        },
+      },
+      animation: {
+        indeterminate: 'indeterminate 1.4s ease-in-out infinite',
+      },
       colors: {
         brand: {
           50:  '#f0fdf4',

@@ -35,34 +35,54 @@ _job_map: dict[int, dict] = {}
 _tail_stop: dict[int, threading.Event] = {}
 
 
-def _tail_job_log(log_path: str, stop: threading.Event, prefix: str):
+def _tail_job_log(log_path: str, stop: threading.Event, prefix: str, line_filter=None):
     """
     Read new lines from a per-job log file and print them to stdout so they
     appear in snakemake_run.log (Snakemake redirects this process's stdout there).
-    Polls every 2 s until stop is set, then drains any remaining lines.
+    Waits up to 30 s for the log file to be created (worker import overhead),
+    then tails from that point. Polls every 2 s until stop is set, then drains.
+    line_filter: optional callable(str) -> bool; only lines returning True are forwarded.
     """
+    # Wait for the file to appear — heavy workers (ee + geopandas imports) can
+    # take several seconds before writing their first log line.
+    deadline = time.time() + 30
+    while not os.path.exists(log_path):
+        if time.time() > deadline or stop.is_set():
+            return
+        time.sleep(0.5)
+
     try:
         with open(log_path, "r", errors="replace") as fh:
-            # Seek to end — we only want lines written from now on.
-            fh.seek(0, 2)
             while not stop.is_set():
                 line = fh.readline()
                 if line:
-                    print(f"[job:{prefix}] {line}", end="", flush=True)
+                    if line_filter is None or line_filter(line):
+                        print(f"[job:{prefix}] {line}", end="", flush=True)
                 else:
                     stop.wait(2)
             # Drain any final lines after the job finishes.
             for line in fh:
-                print(f"[job:{prefix}] {line}", end="", flush=True)
+                if line_filter is None or line_filter(line):
+                    print(f"[job:{prefix}] {line}", end="", flush=True)
     except Exception:
         pass
 
 
-def _start_tail(jobid: int, log_path: str, prefix: str):
+def _start_tail(jobid: int, log_path: str, prefix: str, line_filter=None):
     stop = threading.Event()
     _tail_stop[jobid] = stop
-    t = threading.Thread(target=_tail_job_log, args=(log_path, stop, prefix), daemon=True)
+    t = threading.Thread(target=_tail_job_log, args=(log_path, stop, prefix, line_filter), daemon=True)
     t.start()
+
+
+def _parquet_line_filter(line: str) -> bool:
+    """Forward only the conversion start and summary lines."""
+    return any(k in line for k in ["Converting ", "✓", "ERROR", "WARNING"])
+
+
+def _merge_line_filter(line: str) -> bool:
+    """Forward chunk-loading milestones and the final summary."""
+    return any(k in line for k in ["Loading ", "Loaded ", "✓", "ERROR", "WARNING"])
 
 
 def _stop_tail(jobid: int):
@@ -92,14 +112,15 @@ def _append_run_event(message: str, event_type: str = "info"):
     """Write a single event to run_events. Silently ignores all errors."""
     if not RUN_ID or not DB_PATH:
         return
+    now = datetime.now(timezone.utc).isoformat()
     for attempt in range(3):
         try:
             with duckdb.connect(DB_PATH) as conn:
                 conn.execute(
                     """INSERT INTO run_events
                            (event_time, run_id, event_type, status, message, payload_json)
-                       VALUES (CURRENT_TIMESTAMP, ?, ?, ?, ?, '{}')""",
-                    [RUN_ID, event_type, event_type, message],
+                       VALUES (?, ?, ?, ?, ?, '{}')""",
+                    [now, RUN_ID, event_type, event_type, message],
                 )
             return
         except Exception:
@@ -168,11 +189,19 @@ def _dispatch(log: dict):
         if rule == "merge_product_parquet":
             if prod:
                 _append_run_event(f"Started {prod} merge", event_type="job_start")
+            log_files = log.get("log") or []
+            log_path  = log_files[0] if log_files else None
+            if jobid is not None and log_path:
+                jid = int(jobid)
+                threading.Thread(
+                    target=lambda jid=jid, lp=log_path, pfx=f"merge/{prod}": _start_tail(jid, lp, pfx, _merge_line_filter),
+                    daemon=True,
+                ).start()
             return
 
-        # Only track the GEE extraction step — convert_to_parquet shares the same
-        # (prod, band, chunk) key and would regress "done" back to "running".
-        if rule not in ("", "extract_geojson_chunk"):
+        # Only track the GEE extraction step for job status — convert_to_parquet
+        # shares the same (prod, band, chunk) key and would regress "done" back to "running".
+        if rule not in ("", "extract_geojson_chunk", "convert_to_parquet"):
             return
 
         band      = wc.get("band")
@@ -180,14 +209,23 @@ def _dispatch(log: dict):
         log_files = log.get("log") or []
         log_path  = log_files[0] if log_files else None
 
+        if rule == "convert_to_parquet":
+            # Tail conversion logs (key lines only); do not touch job status in DuckDB.
+            if jobid is not None and log_path:
+                jid = int(jobid)
+                threading.Thread(
+                    target=lambda jid=jid, lp=log_path, pfx=f"{band}/{chunk}:parquet": _start_tail(jid, lp, pfx, _parquet_line_filter),
+                    daemon=True,
+                ).start()
+            return
+
         if jobid is not None and prod and band and chunk:
             jid = int(jobid)
             _job_map[jid] = {"prod": prod, "band": band, "chunk": chunk}
             _upsert_job(prod, band, chunk, "running", jobid=jid, log_path=log_path)
             if log_path:
-                # Wait briefly for the worker to create the log file before tailing.
                 threading.Thread(
-                    target=lambda: (time.sleep(1), _start_tail(jid, log_path, f"{band}/{chunk}")),
+                    target=lambda jid=jid, lp=log_path, pfx=f"{band}/{chunk}": _start_tail(jid, lp, pfx),
                     daemon=True,
                 ).start()
 
@@ -208,8 +246,15 @@ def _dispatch(log: dict):
             error_str = error_str[:500] + "…"
 
         if rule == "merge_product_parquet":
+            if jobid is not None:
+                _stop_tail(int(jobid))
             if prod:
                 _append_run_event(f"Failed {prod} merge: {error_str}", event_type="job_error")
+            return
+
+        if rule == "convert_to_parquet":
+            if jobid is not None:
+                _stop_tail(int(jobid))
             return
 
         if jobid is not None:
@@ -225,11 +270,11 @@ def _dispatch(log: dict):
                             "failed", jobid=int(jobid), error=error_str)
 
     # ── job finished successfully ─────────────────────────────────────────────
-    elif level == "info":
-        msg = log.get("msg") or ""
-        match = re.search(r"Finished job\s+(\d+)", msg)
-        if match:
-            jobid = int(match.group(1))
+    # Snakemake 7 sends level="job_finished" with jobid as a direct field.
+    elif level == "job_finished":
+        jobid = log.get("jobid")
+        if jobid is not None:
+            jobid = int(jobid)
             _stop_tail(jobid)
             wc_cached = _job_map.get(jobid, {})
             if wc_cached:

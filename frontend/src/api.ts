@@ -11,7 +11,7 @@ import type {
 
 const http = axios.create({
   baseURL: '/api',
-  timeout: 30_000,
+  timeout: 120_000,
 })
 
 // ─── GEE credentials ─────────────────────────────────────────────────────────
@@ -60,9 +60,26 @@ export async function triggerPartialCheckout(runId: string): Promise<void> {
   await http.post(`/runs/${runId}/partial`)
 }
 
-export async function retryRun(runId: string): Promise<RunDetail> {
-  const { data } = await http.post<RunDetail>(`/runs/${runId}/retry`)
+export async function retryRun(runId: string, geeConcurrency?: number): Promise<RunDetail> {
+  const { data } = await http.post<RunDetail>(`/runs/${runId}/retry`,
+    geeConcurrency !== undefined ? { gee_concurrency: geeConcurrency } : {}
+  )
   return data
+}
+
+export async function pauseRun(runId: string): Promise<void> {
+  await http.post(`/runs/${runId}/pause`)
+}
+
+export async function resumeRun(runId: string, geeConcurrency?: number): Promise<RunDetail> {
+  const { data } = await http.post<RunDetail>(`/runs/${runId}/resume`,
+    geeConcurrency !== undefined ? { gee_concurrency: geeConcurrency } : {}
+  )
+  return data
+}
+
+export async function resetRun(runId: string): Promise<void> {
+  await http.post(`/runs/${runId}/reset`)
 }
 
 export async function getRunLog(runId: string, lines = 100): Promise<string[]> {
@@ -83,10 +100,19 @@ export async function listEvents(limit = 50): Promise<GlobalEvent[]> {
 
 // ─── AOI ─────────────────────────────────────────────────────────────────────
 
-export async function uploadAOI(runId: string, file: File): Promise<AOIInfo> {
+export async function uploadAOI(
+  runId: string,
+  file: File,
+  onUploadProgress?: (pct: number) => void,
+): Promise<AOIInfo> {
   const form = new FormData()
   form.append('file', file)
-  const { data } = await http.post<AOIInfo>(`/runs/${runId}/aoi`, form)
+  const { data } = await http.post<AOIInfo>(`/runs/${runId}/aoi`, form, {
+    timeout: 120_000,
+    onUploadProgress: onUploadProgress
+      ? (e) => onUploadProgress(e.total ? Math.round((e.loaded / e.total) * 100) : 0)
+      : undefined,
+  })
   return data
 }
 

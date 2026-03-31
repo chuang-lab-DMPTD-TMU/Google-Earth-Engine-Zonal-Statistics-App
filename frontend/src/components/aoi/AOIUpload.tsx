@@ -14,18 +14,24 @@ interface Props {
 
 export default function AOIUpload({ runId, existingAoiName }: Props) {
   const [aoi, setAoi] = useState<AOIInfo | null>(null)
-  const [error, setError]   = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [uploadPct, setUploadPct] = useState<number | null>(null)
 
   const mutation = useMutation({
     mutationFn: ({ file }: { file: File }) => {
       if (!runId) throw new Error('Select or create a run first')
-      return uploadAOI(runId, file)
+      setUploadPct(0)
+      return uploadAOI(runId, file, setUploadPct)
     },
     onSuccess: (info) => {
       setAoi(info)
       setError(null)
+      setUploadPct(null)
     },
-    onError: (err: Error) => setError(err.message),
+    onError: (err: Error) => {
+      setError(err.message)
+      setUploadPct(null)
+    },
   })
 
   const onDrop = useCallback(
@@ -79,12 +85,26 @@ export default function AOIUpload({ runId, existingAoiName }: Props) {
             <input {...getInputProps()} />
             <p className="text-sm text-gray-500">
               {mutation.isPending
-                ? 'Uploading and validating…'
+                ? uploadPct !== null && uploadPct < 100
+                  ? `Uploading… ${uploadPct}%`
+                  : 'Processing…'
                 : isDragActive
                 ? 'Drop file here'
                 : 'Drop shapefile (.zip), GeoJSON, or GeoParquet'}
             </p>
-            <p className="text-xs text-gray-400 mt-1">or click to browse</p>
+            {mutation.isPending && (
+              <div className="mt-3 w-full bg-gray-200 rounded-full h-1.5 overflow-hidden">
+                {uploadPct !== null && uploadPct < 100 ? (
+                  <div
+                    className="h-full bg-brand-400 rounded-full transition-all duration-200"
+                    style={{ width: `${uploadPct}%` }}
+                  />
+                ) : (
+                  <div className="h-full bg-brand-400 rounded-full animate-[indeterminate_1.4s_ease-in-out_infinite] w-1/2" />
+                )}
+              </div>
+            )}
+            {!mutation.isPending && <p className="text-xs text-gray-400 mt-1">or click to browse</p>}
           </div>
         )}
 
@@ -109,7 +129,7 @@ export default function AOIUpload({ runId, existingAoiName }: Props) {
           ? <SnakemakeLog runId={runId} />
           : (
             <div className="rounded-lg overflow-hidden border border-gray-200 h-full min-h-64">
-              <MapPreview geojson={aoi?.geojson_preview ?? null} />
+              <MapPreview geojson={aoi?.geojson_preview ?? null} bounds={aoi?.bounds ?? null} />
             </div>
           )
         }
