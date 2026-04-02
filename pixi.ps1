@@ -17,7 +17,6 @@ function Stop-App {
         $PORT = Get-Content ".pixi.port"
     }
 
-    # Kill by PID if we have it
     if (Test-Path ".pixi.pid") {
         $savedPid = Get-Content ".pixi.pid" -ErrorAction SilentlyContinue
         if ($savedPid) {
@@ -29,7 +28,6 @@ function Stop-App {
         }
     }
 
-    # Safety net — kill anything still on the port
     $listeners = netstat -aon 2>$null | Select-String ":${PORT}\s+.*LISTENING"
     foreach ($line in $listeners) {
         $linePid = ($line -split '\s+')[-1]
@@ -37,11 +35,9 @@ function Stop-App {
         taskkill /pid $linePid /f /t 2>$null | Out-Null
     }
 
-    # Safety net for any uvicorn/pixi leftovers
     taskkill /im uvicorn.exe /f /t 2>$null | Out-Null
     taskkill /im pixi.exe    /f /t 2>$null | Out-Null
 
-    # Clean up state files
     Remove-Item -Force ".pixi.port" -ErrorAction SilentlyContinue
     Remove-Item -Force ".pixi.pid"  -ErrorAction SilentlyContinue
 
@@ -135,14 +131,10 @@ function Start-App {
         Write-Host ""
     }
 
-    Write-Host "  App port : $PORT (requested)"
+    Write-Host "  App port : $PORT"
     Write-Host ""
 
-    $proc        = $null
-    $logFile     = $null
-    $stdoutEvent = $null
-    $stderrEvent = $null
-    $logPath     = Join-Path $PSScriptRoot "pixi.log"
+    $logPath = Join-Path $PSScriptRoot "pixi.log"
 
     try {
         # --- Build frontend ---
@@ -151,7 +143,7 @@ function Start-App {
                          (Get-Item "frontend\node_modules").LastWriteTime)
         if ($needsInstall) {
             Write-Host "  Installing frontend dependencies..."
-            & pixi run npm-install-frontend
+            & pixi run npm-install
             if ($LASTEXITCODE -ne 0) { throw "Frontend install failed." }
         } else {
             Write-Host "  Frontend dependencies up to date, skipping install."
@@ -166,7 +158,7 @@ function Start-App {
 
         $pinfo = New-Object System.Diagnostics.ProcessStartInfo
         $pinfo.FileName               = "pixi"
-        $pinfo.Arguments              = "run uvicorn backend.app:app --host 0.0.0.0 --port $($PORT)"
+        $pinfo.Arguments              = "run uvicorn backend.app:app --host 0.0.0.0 --port $PORT"
         $pinfo.UseShellExecute        = $false
         $pinfo.CreateNoWindow         = $true
         $pinfo.RedirectStandardOutput = $true
@@ -176,33 +168,36 @@ function Start-App {
             Join-Path $PSScriptRoot "config\gee-key.json"
 
         $proc = New-Object System.Diagnostics.Process
-        $proc.StartInfo         = $pinfo
+        $proc.StartInfo           = $pinfo
         $proc.EnableRaisingEvents = $true
         $proc.Start() | Out-Null
 
         $logFile           = [System.IO.StreamWriter]::new($logPath, $false)
         $logFile.AutoFlush = $true
 
-        # Collect lines in a simple list via events
         $lines = [System.Collections.Generic.List[string]]::new()
 
-        $stdoutEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
-            if ($EventArgs.Data -ne $null) {
-                $lines.Add($EventArgs.Data)
-                $logFile.WriteLine($EventArgs.Data)
+        $msgData = @{ Log = $logFile; Lines = $lines }
+
+        $stdoutEvent = Register-ObjectEvent -InputObject $proc `
+            -EventName OutputDataReceived -MessageData $msgData -Action {
+            if ($null -ne $EventArgs.Data) {
+                $Event.MessageData.Lines.Add($EventArgs.Data)
+                $Event.MessageData.Log.WriteLine($EventArgs.Data)
             }
         }
-        $stderrEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
-            if ($EventArgs.Data -ne $null) {
-                $lines.Add($EventArgs.Data)
-                $logFile.WriteLine($EventArgs.Data)
+        $stderrEvent = Register-ObjectEvent -InputObject $proc `
+            -EventName ErrorDataReceived -MessageData $msgData -Action {
+            if ($null -ne $EventArgs.Data) {
+                $Event.MessageData.Lines.Add($EventArgs.Data)
+                $Event.MessageData.Log.WriteLine($EventArgs.Data)
             }
         }
 
         $proc.BeginOutputReadLine()
         $proc.BeginErrorReadLine()
 
-        # --- Poll lines for up to 60 s watching for uvicorn's ready line ---
+        # --- Poll for uvicorn ready line (up to 60 s) ---
         Write-Host "  Waiting for backend..."
         Write-Host ""
 
@@ -236,20 +231,31 @@ function Start-App {
         }
         Write-Host -NoNewline "`r                                    `r"
 
-        # Clean up event subscriptions
         Unregister-Event -SourceIdentifier $stdoutEvent.Name -ErrorAction SilentlyContinue
         Unregister-Event -SourceIdentifier $stderrEvent.Name -ErrorAction SilentlyContinue
 
-        # --- Verify HTTP response ---
+        if (-not $confirmedPort) {
+            throw "Backend did not report ready within 60 s. Check pixi.log for details."
+        }
+
+        # --- Verify HTTP response (tries 127.0.0.1 then localhost) ---
+        Write-Host "  Verifying HTTP response..."
+        Write-Host ""
+        $uris  = @("http://127.0.0.1:$PORT/api/gee-key", "http://localhost:$PORT/api/gee-key")
         $ready = $false
         for ($i = 0; $i -lt 10; $i++) {
-            try {
-                $r = Invoke-WebRequest -Uri "http://localhost:$PORT/api/gee-key" `
-                         -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-                if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
-                    $ready = $true; break
+            foreach ($uri in $uris) {
+                try {
+                    $r = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+                    Write-Host "  Attempt $($i+1) ($uri): HTTP $($r.StatusCode)"
+                    if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
+                        $ready = $true; break
+                    }
+                } catch {
+                    Write-Host "  Attempt $($i+1) ($uri) failed: $_"
                 }
-            } catch {}
+            }
+            if ($ready) { break }
             Start-Sleep 1
         }
 
@@ -276,7 +282,6 @@ function Start-App {
         Write-Host "  ERROR: $_"
         Write-Host ""
 
-        # Clean up event subscriptions
         if ($null -ne $stdoutEvent) {
             Unregister-Event -SourceIdentifier $stdoutEvent.Name -ErrorAction SilentlyContinue
         }
