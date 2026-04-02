@@ -41,41 +41,47 @@ The app sends those requests to Google Earth Engine in the background and produc
 
 ## 2. Starting and stopping the app
 
-### Start
+Read the block that matches your chosen launch method.
 
-**Docker option (Linux only):**
+---
 
-Open a terminal in the folder and run:
+### Using Docker (Linux only)
+
+> Docker is not yet available on Windows. Windows users should use the Pixi section below.
+
+**Start:** open a terminal in the folder and run:
 
 ```
 ./docker.sh start
 ```
 
-> Docker is not yet available on Windows. Windows users should use the Pixi option below.
+**Stop:**
 
-**Pixi option:**
+```
+./docker.sh stop
+```
+
+---
+
+### Using Pixi (Windows and Linux)
+
+**Start:**
 
 | Platform | Action |
 |----------|--------|
 | Windows | Double-click `pixi.bat` and choose **start** |
 | Linux | Run `./pixi.sh start` in a terminal |
 
-The first launch downloads and installs all dependencies (3–10 minutes). Every launch after that is much faster. When the app is ready, your browser opens automatically.
-
-### Stop
-
-**Docker option (Linux only):**
-
-```
-./docker.sh stop
-```
-
-**Pixi option:**
+**Stop:**
 
 | Platform | Action |
 |----------|--------|
 | Windows | Double-click `pixi.bat` and choose **stop** |
 | Linux | Run `./pixi.sh stop` in a terminal |
+
+---
+
+The first launch downloads and installs all dependencies (3–10 minutes). Every launch after that is much faster. When the app is ready, your browser opens automatically.
 
 Closing the browser tab does **not** stop the app. Any extraction that is in progress will keep running in the background until you use the stop command — or until it finishes.
 
@@ -247,15 +253,27 @@ A `.json` file that gives the app access to Google Earth Engine. See [Getting a 
 
 ## 13. Troubleshooting
 
+### Docker
+
 | Symptom | Likely cause | What to do |
 |---------|-------------|------------|
-| Browser does not open after launching (Docker) | Docker is not running | Open Docker Desktop and wait for it to start, then try again |
-| Browser does not open after launching (Pixi) | Pixi not installed or not on PATH | Re-run the start script and accept the install prompt; if it still fails, open a new terminal and try again |
+| Browser does not open after launching | Docker is not running | Open Docker Desktop and wait for it to start, then try again |
+| File ownership errors on Linux | UID/GID mismatch | Always use `./docker.sh start` rather than starting Docker manually |
+
+### Pixi
+
+| Symptom | Likely cause | What to do |
+|---------|-------------|------------|
+| Browser does not open after launching | Pixi not installed or not on PATH | Re-run the start script and accept the install prompt; if it still fails, open a new terminal and try again |
 | `pixi` command not found after the install prompt | PATH not updated in current session | Close and reopen your terminal, then run `./pixi.sh start` again |
+
+### General
+
+| Symptom | Likely cause | What to do |
+|---------|-------------|------------|
 | App opens but shows an upload prompt immediately | No GEE key stored yet | Upload your `.json` service account key |
 | "Authentication error" after uploading key | Key is invalid or the service account lacks Earth Engine access | Check that the service account has the **Earth Engine** role in Google Cloud Console |
 | Run shows **failed** immediately | Configuration or geometry issue | Check the event log for an error message; correct the issue and click **Retry Run** |
 | Progress bar has been stuck for a long time | GEE rate limit or network issue | Wait a few minutes; check the Snakemake log for error lines |
 | Download button does nothing | No result file yet | Ensure the run is completed or use **Build Partial Checkout** for in-progress runs |
-| File ownership errors on Linux (Docker) | UID/GID mismatch | Always use `./docker.sh start` rather than starting Docker manually |
 | App stops responding after closing the browser | Expected — the app still runs | Re-open the browser and navigate to the address shown when you started the app |

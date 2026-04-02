@@ -26,43 +26,29 @@ A small file (ending in `.json`) that gives the app access to Google Earth Engin
 
 ---
 
-## Starting the app
+## Starting and stopping the app
 
-**Docker option (Linux only):**
+Read the block that matches your chosen method.
 
-Open a terminal in the folder and run:
+### Using Docker (Linux only)
+
+> Docker is not yet available on Windows. Windows users should use Pixi below.
 
 ```
 ./docker.sh start
-```
-
-**Pixi option:**
-
-| Platform | Action |
-|----------|--------|
-| Windows | Double-click `pixi.bat` and choose **start** |
-| Linux | Open a terminal in the folder and run `./pixi.sh start` |
-
-The first launch takes a few minutes to set up. You can use this time to read the [User Manual](USER_MANUAL.md). When it is ready, your browser will open automatically.
-
----
-
-## Stopping the app
-
-**Docker option (Linux only):**
-
-```
 ./docker.sh stop
 ```
 
-**Pixi option:**
+### Using Pixi (Windows and Linux)
 
-| Platform | Action |
-|----------|--------|
-| Windows | Double-click `pixi.bat` and choose **stop** |
-| Linux | Run `./pixi.sh stop` in a terminal |
+| Action | Windows | Linux |
+|--------|---------|-------|
+| Start | Double-click `pixi.bat` → choose **start** | `./pixi.sh start` |
+| Stop | Double-click `pixi.bat` → choose **stop** | `./pixi.sh stop` |
 
-Closing the browser tab does **not** stop the app — any running download will continue in the background until you use the stop file.
+The first launch takes a few minutes to set up. You can use this time to read the [User Manual](USER_MANUAL.md). When it is ready, your browser will open automatically.
+
+Closing the browser tab does **not** stop the app — any running download will continue in the background until you use the stop command.
 
 ---
 
@@ -104,43 +90,29 @@ The first time you open the app it will ask you to upload this file. After that 
 
 ---
 
-## 啟動應用程式
+## 啟動與停止應用程式
 
-**Docker 選項（僅限 Linux）：**
+依您選擇的執行方式，閱讀對應的區塊即可。
 
-在資料夾中開啟終端機並執行：
+### 使用 Docker（僅限 Linux）
+
+> Docker 目前尚未支援 Windows。Windows 使用者請使用下方的 Pixi 區塊。
 
 ```
 ./docker.sh start
-```
-
-**Pixi 選項：**
-
-| 平台 | 操作方式 |
-|------|----------|
-| Windows | 雙擊 `pixi.bat`，選擇 **start** |
-| Linux | 在資料夾中開啟終端機並執行 `./pixi.sh start` |
-
-首次啟動需要幾分鐘進行初始化。您可以利用這段時間閱讀[使用手冊](USER_MANUAL.md)。準備就緒後，瀏覽器將自動開啟。
-
----
-
-## 停止應用程式
-
-**Docker 選項（僅限 Linux）：**
-
-```
 ./docker.sh stop
 ```
 
-**Pixi 選項：**
+### 使用 Pixi（Windows 與 Linux）
 
-| 平台 | 操作方式 |
-|------|----------|
-| Windows | 雙擊 `pixi.bat`，選擇 **stop** |
-| Linux | 在終端機中執行 `./pixi.sh stop` |
+| 操作 | Windows | Linux |
+|------|---------|-------|
+| 啟動 | 雙擊 `pixi.bat`，選擇 **start** | `./pixi.sh start` |
+| 停止 | 雙擊 `pixi.bat`，選擇 **stop** | `./pixi.sh stop` |
 
-關閉瀏覽器分頁不會停止應用程式——任何正在進行的下載都會在背景繼續，直到您使用對應的停止檔案為止。
+首次啟動需要幾分鐘進行初始化。您可以利用這段時間閱讀[使用手冊](USER_MANUAL_ZH.md)。準備就緒後，瀏覽器將自動開啟。
+
+關閉瀏覽器分頁不會停止應用程式——任何正在進行的下載都會在背景繼續，直到您使用停止指令為止。
 
 ---
 
