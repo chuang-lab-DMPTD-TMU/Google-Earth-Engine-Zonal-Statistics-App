@@ -357,6 +357,17 @@ def _list_saved_runs() -> list[dict]:
             ).fetchall()
         for run_id, status, created_at, updated_at in rows:
             if run_id not in seen:
+                # If the run directory no longer exists on disk, the user manually
+                # deleted it — purge from DuckDB so the UI stops showing it.
+                if not (RUNS_DIR / run_id).exists():
+                    try:
+                        with _duckdb_connect() as conn:
+                            conn.execute("DELETE FROM run_status WHERE run_id = ?", [run_id])
+                            conn.execute("DELETE FROM run_events WHERE run_id = ?", [run_id])
+                            conn.execute("DELETE FROM jobs WHERE run_id = ?", [run_id])
+                    except Exception:
+                        pass
+                    continue
                 runs.append({
                     "run_id":     run_id,
                     "status":     status,

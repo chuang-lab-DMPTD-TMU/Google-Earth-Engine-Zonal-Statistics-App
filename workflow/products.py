@@ -104,7 +104,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
         "ee_collection": "ESA/WorldCover/v100",
         "min_date": "2020-01-01",
         "max_date": "2020-12-31",
-        "scale": 500,
+        "scale": 10,
         "cadence": "annual",
         "categorical": True,
         "content": {
@@ -118,7 +118,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
         "ee_collection": "ESA/WorldCover/v200",
         "min_date": "2021-01-01",
         "max_date": "2021-12-31",
-        "scale": 500,
+        "scale": 10,
         "cadence": "annual",
         "categorical": True,
         "content": {
@@ -214,7 +214,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
         ],
         "min_date": "1984-01-01",
         "max_date": "2025-12-31",
-        "scale": 1000,
+        "scale": 30,
         "cadence": "seasonal",
         "categorical": False,
         "content": {

@@ -5,20 +5,7 @@ param(
 
 Set-Location $PSScriptRoot
 
-switch ($Command) {
-    "start" { Start-App }
-    "stop"  { Stop-App }
-    default {
-        Write-Host ""
-        Write-Host "  Usage: pixi.bat [start|stop]"
-        Write-Host ""
-        Write-Host "    start  -- build frontend and start backend via Pixi"
-        Write-Host "    stop   -- stop all Pixi-managed processes"
-        Write-Host ""
-        exit 1
-    }
-}
-
+# ── Functions ──────────────────────────────────────────────────────────────────
 
 function Stop-App {
     Write-Host ""
@@ -30,15 +17,27 @@ function Stop-App {
         $PORT = Get-Content ".pixi.port"
     }
 
-    # Kill by port
-    $listeners = netstat -aon 2>$null | Select-String ":${PORT}\s+.*LISTENING"
-    foreach ($line in $listeners) {
-        $pid = ($line -split '\s+')[-1]
-        Write-Host "  Killing PID $pid on port $PORT..."
-        taskkill /pid $pid /f /t 2>$null | Out-Null
+    # Kill by PID if we have it
+    if (Test-Path ".pixi.pid") {
+        $savedPid = Get-Content ".pixi.pid" -ErrorAction SilentlyContinue
+        if ($savedPid) {
+            $p = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
+            if ($p) {
+                Write-Host "  Stopping PID $savedPid..."
+                try { $p.Kill($true) } catch {}
+            }
+        }
     }
 
-    # Safety net
+    # Safety net — kill anything still on the port
+    $listeners = netstat -aon 2>$null | Select-String ":${PORT}\s+.*LISTENING"
+    foreach ($line in $listeners) {
+        $linePid = ($line -split '\s+')[-1]
+        Write-Host "  Killing PID $linePid on port $PORT..."
+        taskkill /pid $linePid /f /t 2>$null | Out-Null
+    }
+
+    # Safety net for any uvicorn/pixi leftovers
     taskkill /im uvicorn.exe /f /t 2>$null | Out-Null
     taskkill /im pixi.exe    /f /t 2>$null | Out-Null
 
@@ -55,6 +54,25 @@ function Start-App {
     Write-Host "  GEE Web App - Pixi (no Docker)"
     Write-Host "  ================================"
     Write-Host ""
+
+    # --- Clean up any previous run ---
+    if (Test-Path ".pixi.pid") {
+        $oldPid = Get-Content ".pixi.pid" -ErrorAction SilentlyContinue
+        if ($oldPid) {
+            $oldProc = Get-Process -Id $oldPid -ErrorAction SilentlyContinue
+            if ($oldProc) {
+                Write-Host "  Found leftover process (PID $oldPid), stopping it..."
+                try { $oldProc.Kill($true) } catch {}
+            }
+        }
+        Remove-Item -Force ".pixi.pid" -ErrorAction SilentlyContinue
+    }
+    Remove-Item -Force ".pixi.port" -ErrorAction SilentlyContinue
+
+    # --- Rotate log ---
+    if (Test-Path "pixi.log") {
+        Move-Item -Force "pixi.log" "pixi.last.log" -ErrorAction SilentlyContinue
+    }
 
     # --- Check pixi ---
     if (-not (Get-Command pixi -ErrorAction SilentlyContinue)) {
@@ -75,6 +93,8 @@ function Start-App {
                 Write-Host "  Please open a new terminal and run again."
                 exit 1
             }
+            Write-Host "  Pixi ready."
+            Write-Host ""
         } else {
             Write-Host "  Pixi is required. Exiting."
             exit 1
@@ -100,7 +120,7 @@ function Start-App {
     # --- Find a free port ---
     $PORT = $null
     foreach ($p in 8000, 8001, 8002, 8003) {
-        $inUse = netstat -an 2>$null | Select-String ":$p\s+.*LISTENING"
+        $inUse = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
         if (-not $inUse) { $PORT = $p; break }
     }
     if (-not $PORT) {
@@ -115,69 +135,190 @@ function Start-App {
         Write-Host ""
     }
 
-    Write-Host "  App port : $PORT"
+    Write-Host "  App port : $PORT (requested)"
     Write-Host ""
 
-    # --- Build frontend ---
-    $needsInstall = (-not (Test-Path "frontend\node_modules")) -or
-                    ((Get-Item "frontend\package.json").LastWriteTime -gt
-                     (Get-Item "frontend\node_modules").LastWriteTime)
-    if ($needsInstall) {
-        Write-Host "  Installing frontend dependencies..."
-        & pixi run npm-install-frontend
-        if ($LASTEXITCODE -ne 0) { Write-Host "  Frontend install failed."; exit 1 }
-    } else {
-        Write-Host "  Frontend dependencies up to date, skipping install."
-    }
+    $proc        = $null
+    $logFile     = $null
+    $stdoutEvent = $null
+    $stderrEvent = $null
+    $logPath     = Join-Path $PSScriptRoot "pixi.log"
 
-    Write-Host "  Building frontend..."
-    & pixi run build-frontend
-    if ($LASTEXITCODE -ne 0) { Write-Host "  Frontend build failed."; exit 1 }
+    try {
+        # --- Build frontend ---
+        $needsInstall = (-not (Test-Path "frontend\node_modules")) -or
+                        ((Get-Item "frontend\package.json").LastWriteTime -gt
+                         (Get-Item "frontend\node_modules").LastWriteTime)
+        if ($needsInstall) {
+            Write-Host "  Installing frontend dependencies..."
+            & pixi run npm-install-frontend
+            if ($LASTEXITCODE -ne 0) { throw "Frontend install failed." }
+        } else {
+            Write-Host "  Frontend dependencies up to date, skipping install."
+        }
 
-    # --- Launch backend ---
-    Write-Host "  Starting backend..."
-    $env:GOOGLE_APPLICATION_CREDENTIALS = "config\gee-key.json"
-    $logPath = Join-Path $PSScriptRoot "pixi.log"
-    $proc = Start-Process cmd `
-        -ArgumentList "/c pixi run uvicorn backend.app:app --host 0.0.0.0 --port $PORT >> `"$logPath`" 2>&1" `
-        -WindowStyle Hidden `
-        -PassThru
+        Write-Host "  Building frontend..."
+        & pixi run build-frontend
+        if ($LASTEXITCODE -ne 0) { throw "Frontend build failed." }
 
-    Set-Content -Path ".pixi.port" -Value $PORT
-    Set-Content -Path ".pixi.pid"  -Value $proc.Id
+        # --- Launch backend ---
+        Write-Host "  Starting backend..."
 
-    # --- Wait for backend ---
-    Write-Host "  Waiting for backend..."
-    Write-Host ""
-    $ready = $false
-    for ($i = 0; $i -lt 60; $i++) {
-        try {
-            $r = Invoke-WebRequest -Uri "http://localhost:$PORT/api/gee-key" `
-                     -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
-            if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
-                $ready = $true
-                break
+        $pinfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pinfo.FileName               = "pixi"
+        $pinfo.Arguments              = "run uvicorn backend.app:app --host 0.0.0.0 --port $($PORT)"
+        $pinfo.UseShellExecute        = $false
+        $pinfo.CreateNoWindow         = $true
+        $pinfo.RedirectStandardOutput = $true
+        $pinfo.RedirectStandardError  = $true
+        $pinfo.WorkingDirectory       = $PSScriptRoot
+        $pinfo.EnvironmentVariables["GOOGLE_APPLICATION_CREDENTIALS"] = `
+            Join-Path $PSScriptRoot "config\gee-key.json"
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo         = $pinfo
+        $proc.EnableRaisingEvents = $true
+        $proc.Start() | Out-Null
+
+        $logFile           = [System.IO.StreamWriter]::new($logPath, $false)
+        $logFile.AutoFlush = $true
+
+        # Collect lines in a simple list via events
+        $lines = [System.Collections.Generic.List[string]]::new()
+
+        $stdoutEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action {
+            if ($EventArgs.Data -ne $null) {
+                $lines.Add($EventArgs.Data)
+                $logFile.WriteLine($EventArgs.Data)
             }
-        } catch {}
-        Write-Host -NoNewline "`r  Still waiting... ($i s)  "
-        Start-Sleep 1
-    }
-    Write-Host -NoNewline "`r                                    `r"
+        }
+        $stderrEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action {
+            if ($EventArgs.Data -ne $null) {
+                $lines.Add($EventArgs.Data)
+                $logFile.WriteLine($EventArgs.Data)
+            }
+        }
 
-    if (-not $ready) {
+        $proc.BeginOutputReadLine()
+        $proc.BeginErrorReadLine()
+
+        # --- Poll lines for up to 60 s watching for uvicorn's ready line ---
+        Write-Host "  Waiting for backend..."
         Write-Host ""
-        Write-Host "  ERROR: App did not respond after 60 s."
-        Write-Host "  Check pixi.log for details."
+
+        $confirmedPort = $null
+        $startupFailed = $false
+        $deadline      = (Get-Date).AddSeconds(60)
+
+        while ((Get-Date) -lt $deadline) {
+            foreach ($line in $lines.ToArray()) {
+                if ($line -match 'Uvicorn running on http://[^:]+:(\d+)') {
+                    $confirmedPort = [int]$Matches[1]
+                }
+                if ($line -match 'Address already in use|failed to bind') {
+                    $startupFailed = $true
+                }
+            }
+
+            if ($confirmedPort) { break }
+
+            if ($startupFailed) {
+                throw "Backend failed to bind to port. Check pixi.log for details."
+            }
+
+            if ($proc.HasExited) {
+                throw "Backend process exited unexpectedly (code $($proc.ExitCode)). Check pixi.log for details."
+            }
+
+            $elapsed = [int]((Get-Date) - $deadline.AddSeconds(-60)).TotalSeconds
+            Write-Host -NoNewline "`r  Still waiting... ($elapsed s)  "
+            Start-Sleep -Milliseconds 500
+        }
+        Write-Host -NoNewline "`r                                    `r"
+
+        # Clean up event subscriptions
+        Unregister-Event -SourceIdentifier $stdoutEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $stderrEvent.Name -ErrorAction SilentlyContinue
+
+        # --- Verify HTTP response ---
+        $ready = $false
+        for ($i = 0; $i -lt 10; $i++) {
+            try {
+                $r = Invoke-WebRequest -Uri "http://localhost:$PORT/api/gee-key" `
+                         -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+                if ($r.StatusCode -ge 200 -and $r.StatusCode -lt 500) {
+                    $ready = $true; break
+                }
+            } catch {}
+            Start-Sleep 1
+        }
+
+        if (-not $ready) {
+            throw "Uvicorn started but app did not respond on port $PORT. Check pixi.log for details."
+        }
+
+        # --- Write state files only after confirmed ready ---
+        Set-Content -Path ".pixi.port" -Value $PORT
+        Set-Content -Path ".pixi.pid"  -Value $proc.Id
+
+        Write-Host ""
+        Write-Host "  =========================================="
+        Write-Host "   GEE Web App is ready"
+        Write-Host "   http://localhost:$PORT"
+        Write-Host "  =========================================="
+        Write-Host ""
+        Start-Process "http://localhost:$PORT"
+        Write-Host "  Run: pixi.bat stop -- when you are done."
+        Write-Host ""
+
+    } catch {
+        Write-Host ""
+        Write-Host "  ERROR: $_"
+        Write-Host ""
+
+        # Clean up event subscriptions
+        if ($null -ne $stdoutEvent) {
+            Unregister-Event -SourceIdentifier $stdoutEvent.Name -ErrorAction SilentlyContinue
+        }
+        if ($null -ne $stderrEvent) {
+            Unregister-Event -SourceIdentifier $stderrEvent.Name -ErrorAction SilentlyContinue
+        }
+
+        if ($null -ne $logFile) {
+            try { $logFile.Close() } catch {}
+        }
+
+        if ($null -ne $proc -and -not $proc.HasExited) {
+            Write-Host "  Killing backend process (PID $($proc.Id))..."
+            try { $proc.Kill($true) } catch {}
+        }
+
+        taskkill /im uvicorn.exe /f /t 2>$null | Out-Null
+        taskkill /im pixi.exe    /f /t 2>$null | Out-Null
+
+        Remove-Item -Force ".pixi.port" -ErrorAction SilentlyContinue
+        Remove-Item -Force ".pixi.pid"  -ErrorAction SilentlyContinue
+
+        if (Test-Path "pixi.last.log") {
+            Write-Host "  Check pixi.last.log for the previous run if this is a repeat failure."
+        }
+        Write-Host ""
         exit 1
     }
+}
 
-    Write-Host ""
-    Write-Host "  =========================================="
-    Write-Host "   GEE Web App is ready"
-    Write-Host "   http://localhost:$PORT"
-    Write-Host "  =========================================="
-    Write-Host ""
-    Start-Process "http://localhost:$PORT"
-    Write-Host "  Run: pixi.bat stop -- when you are done."
-    Write-Host ""
+# ── Entry point ────────────────────────────────────────────────────────────────
+
+switch ($Command) {
+    "start" { Start-App }
+    "stop"  { Stop-App }
+    default {
+        Write-Host ""
+        Write-Host "  Usage: pixi.bat [start|stop]"
+        Write-Host ""
+        Write-Host "    start  -- build frontend and start backend via Pixi"
+        Write-Host "    stop   -- stop all Pixi-managed processes"
+        Write-Host ""
+        exit 1
+    }
 }
