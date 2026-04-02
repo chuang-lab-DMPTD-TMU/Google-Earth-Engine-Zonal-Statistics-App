@@ -58,9 +58,32 @@ export default function ProductCard({ product }: Props) {
   }
 
   const cadenceLabel: Record<string, string> = {
-    daily: 'Daily → monthly chunks',
-    composite: 'Composite → quarterly chunks',
-    annual: 'Annual chunks',
+    daily:    'Daily → monthly chunks',
+    composite:'Composite → quarterly chunks',
+    seasonal: 'Seasonal → one value per quarter',
+    annual:   'Annual chunks',
+  }
+
+  const QUARTERS = [
+    { label: 'Q1 (Jan–Mar)', value: 1 },
+    { label: 'Q2 (Apr–Jun)', value: 4 },
+    { label: 'Q3 (Jul–Sep)', value: 7 },
+    { label: 'Q4 (Oct–Dec)', value: 10 },
+  ]
+  const minYear = parseInt(product.date_min.slice(0, 4))
+  const maxYear = parseInt(product.date_max.slice(0, 4))
+  const years   = Array.from({ length: maxYear - minYear + 1 }, (_, i) => minYear + i)
+
+  function dateToSeason(d: string) {
+    const [y, m] = d.split('-').map(Number)
+    return { year: y, q: QUARTERS[Math.floor((m - 1) / 3)].value }
+  }
+  function seasonStart(year: number, q: number) {
+    return `${year}-${String(q).padStart(2, '0')}-01`
+  }
+  function seasonEnd(year: number, q: number) {
+    const ends: Record<number, string> = { 1: '03-31', 4: '06-30', 7: '09-30', 10: '12-31' }
+    return `${year}-${ends[q]}`
   }
 
   return (
@@ -95,30 +118,62 @@ export default function ProductCard({ product }: Props) {
         <div className="px-3 pb-3 border-t border-gray-100 pt-2 space-y-3">
 
           {/* Date range */}
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <p className="text-xs text-gray-500 mb-1">Start date</p>
-              <input
-                type="date"
-                className="input text-xs py-1"
-                value={dateStart}
-                min={product.date_min}
-                max={product.date_max}
-                onChange={(e) => onDateChange(e.target.value, dateEnd)}
-              />
+          {product.cadence === 'seasonal' ? (
+            <div className="flex gap-2">
+              {([
+                { label: 'Start season', date: dateStart, onPick: (y: number, q: number) => onDateChange(seasonStart(y, q), dateEnd) },
+                { label: 'End season',   date: dateEnd,   onPick: (y: number, q: number) => onDateChange(dateStart, seasonEnd(y, q)) },
+              ] as const).map(({ label, date, onPick }) => {
+                const { year, q } = dateToSeason(date)
+                return (
+                  <div key={label} className="flex-1">
+                    <p className="text-xs text-gray-500 mb-1">{label}</p>
+                    <div className="flex gap-1">
+                      <select
+                        className="input text-xs py-1 flex-1 min-w-0"
+                        value={year}
+                        onChange={(e) => onPick(Number(e.target.value), q)}
+                      >
+                        {years.map((y) => <option key={y} value={y}>{y}</option>)}
+                      </select>
+                      <select
+                        className="input text-xs py-1"
+                        value={q}
+                        onChange={(e) => onPick(year, Number(e.target.value))}
+                      >
+                        {QUARTERS.map((qo) => <option key={qo.value} value={qo.value}>{qo.label}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
-            <div className="flex-1">
-              <p className="text-xs text-gray-500 mb-1">End date</p>
-              <input
-                type="date"
-                className="input text-xs py-1"
-                value={dateEnd}
-                min={product.date_min}
-                max={product.date_max}
-                onChange={(e) => onDateChange(dateStart, e.target.value)}
-              />
+          ) : (
+            <div className="flex gap-2">
+              <div className="flex-1">
+                <p className="text-xs text-gray-500 mb-1">Start date</p>
+                <input
+                  type="date"
+                  className="input text-xs py-1"
+                  value={dateStart}
+                  min={product.date_min}
+                  max={product.date_max}
+                  onChange={(e) => onDateChange(e.target.value, dateEnd)}
+                />
+              </div>
+              <div className="flex-1">
+                <p className="text-xs text-gray-500 mb-1">End date</p>
+                <input
+                  type="date"
+                  className="input text-xs py-1"
+                  value={dateEnd}
+                  min={product.date_min}
+                  max={product.date_max}
+                  onChange={(e) => onDateChange(dateStart, e.target.value)}
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Bands */}
           <div>

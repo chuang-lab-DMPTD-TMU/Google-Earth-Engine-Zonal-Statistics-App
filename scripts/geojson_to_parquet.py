@@ -63,12 +63,46 @@ def convert_geojson_to_parquet(geojson_path, parquet_path, log_file=None):
         columns = conn.execute("PRAGMA table_info(geojson_data)").fetchall()
         column_names = [col[1] for col in columns]
         log_progress(f"Columns: {', '.join(column_names)}", log_file)
-        
+
+        # Collapse duplicate (region_id, Date) rows that arise when multiple
+        # Landsat path/row tiles cover the same AOI region on the same date.
+        # AVG on numeric columns gives the correct mean across overlapping scenes;
+        # geometry is identical for all rows of the same region so ANY_VALUE is exact.
+        # For products with no scene overlap this GROUP BY is a no-op.
+        group_keys = [c for c in column_names if c in ('region_id', 'Date')]
+        if group_keys:
+            select_parts = []
+            for col in columns:
+                name, dtype = col[1], col[2].upper()
+                if name in group_keys:
+                    select_parts.append(f'"{name}"')
+                elif 'GEOMETRY' in dtype:
+                    select_parts.append(f'ANY_VALUE("{name}") AS "{name}"')
+                elif any(t in dtype for t in ('FLOAT', 'DOUBLE', 'REAL', 'INT', 'DECIMAL',
+                                               'NUMERIC', 'BIGINT', 'SMALLINT', 'TINYINT', 'HUGEINT')):
+                    select_parts.append(f'AVG("{name}") AS "{name}"')
+                else:
+                    select_parts.append(f'ANY_VALUE("{name}") AS "{name}"')
+            group_clause = ', '.join(f'"{k}"' for k in group_keys)
+            conn.execute(
+                f"CREATE TABLE deduped AS SELECT {', '.join(select_parts)} "
+                f"FROM geojson_data GROUP BY {group_clause}"
+            )
+            deduped_count = conn.execute("SELECT COUNT(*) FROM deduped").fetchone()[0]
+            if deduped_count < row_count:
+                log_progress(
+                    f"Deduplicated {row_count} → {deduped_count} rows "
+                    f"(same-date scene overlap collapsed)", log_file
+                )
+            export_table = "deduped"
+        else:
+            export_table = "geojson_data"
+
         # Write to Parquet with compression
         log_progress(f"Writing GeoParquet: {parquet_path}", log_file)
         conn.execute(f"""
-            COPY geojson_data 
-            TO '{parquet_path}' 
+            COPY {export_table}
+            TO '{parquet_path}'
             (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 100000)
         """)
         

@@ -32,26 +32,16 @@ export default function Sidebar({ keyStatus }: SidebarProps) {
         {/* Step 1 – Credentials */}
         <CredentialsPanel keyStatus={keyStatus} />
 
+        {/* Event logs – right under credentials */}
+        {keyValid && <EventFeed />}
+
         {/* Step 2 – Run session (only once credentials are valid) */}
         {keyValid && <RunSelector />}
-
-        {/* Active run indicator */}
-        {hasRun && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-brand-50 border border-brand-200">
-            <span className="text-brand-500 text-xs font-medium shrink-0">Active run</span>
-            <span className="font-mono text-xs text-brand-800 truncate">
-              {activeRunId ?? pendingRun.run_id}
-            </span>
-          </div>
-        )}
 
         {/* Step 3 – Dataset configuration (editable for new runs, read-only for existing) */}
         {hasRun && (
           activeRunId ? <RunDatasetView runId={activeRunId} /> : <DatasetConfig />
         )}
-
-        {/* Global event feed – always visible once credentials are valid */}
-        {keyValid && <EventFeed />}
       </div>
     </aside>
   )

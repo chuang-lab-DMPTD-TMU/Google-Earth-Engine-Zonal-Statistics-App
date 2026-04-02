@@ -110,7 +110,7 @@ export default function AOIUpload({ runId, existingAoiName }: Props) {
 
         {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
 
-        {aoi && (
+        {aoi && !existingAoiName && (
           <div className="mt-2 text-xs text-gray-600 space-y-0.5">
             <p>
               <span className="font-medium">{aoi.feature_count}</span> features ·{' '}

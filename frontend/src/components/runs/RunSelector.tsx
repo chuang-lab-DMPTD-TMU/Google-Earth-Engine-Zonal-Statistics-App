@@ -12,13 +12,14 @@ export default function RunSelector() {
     refetchInterval: 5_000,
   })
 
-  const { activeRunId, setActiveRunId, setPendingRunId, resetPending } = useAppStore()
+  const { activeRunId, pendingRun, setActiveRunId, setPendingRunId, resetPending } = useAppStore()
   const [newRunId, setNewRunId]         = useState('')
   const [autoId, setAutoId]             = useState('')
   const [showNew, setShowNew]           = useState(false)
   const [showPrevious, setShowPrevious] = useState(false)
 
-  const hasActiveRun = runs.some((r) => r.status === 'running')
+  const hasActiveRun  = runs.some((r) => r.status === 'running')
+  const activeRunLabel = activeRunId ?? pendingRun.run_id
 
   function openNew() {
     setAutoId(crypto.randomUUID())
@@ -52,6 +53,13 @@ export default function RunSelector() {
         </button>
       </div>
 
+      {activeRunLabel && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-brand-50 border border-brand-200 mb-2">
+          <span className="text-brand-500 text-xs font-medium shrink-0">Active run</span>
+          <span className="font-mono text-xs text-brand-800 truncate">{activeRunLabel}</span>
+        </div>
+      )}
+
       {showNew && (
         <div className="mb-3 flex gap-2">
           <input
@@ -83,7 +91,7 @@ export default function RunSelector() {
           </button>
 
           {showPrevious && (
-            <ul className="space-y-1 mt-2">
+            <ul className="space-y-1 mt-2 max-h-48 overflow-y-auto">
               {runs.map((run) => (
                 <li key={run.run_id}>
                   <button

@@ -10,10 +10,20 @@ Cloud-ready: GeoParquet is optimized for object storage (S3, GCS, Azure)
 """
 import pandas as pd
 import os
+import sys
 from pathlib import Path
 
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning, module="google")
+
+# Ensure the project root is on sys.path for scripts run by Snakemake
+_project_root = str(Path(workflow.basedir))
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+os.environ.setdefault("PYTHONPATH", _project_root)
+
+from workflow.time_chunks import infer_time_chunks, chunk_start_date, chunk_end_date
+from workflow.state import update_run_state
 
 
 # Configuration
@@ -23,7 +33,12 @@ RUN_ID = config.get("run_id", "default")
 APP_DIR = config.get("app_dir", "/app")
 _gee_slots    = int(config.get("gee_concurrency", 10))
 _num_products = max(1, len(PRODUCTS))
-_dynamic_window = -(-_gee_slots // _num_products)  # ceiling division
+# Max gee_weight across selected products — determines true concurrent chunk limit.
+# A product with gee_weight=5 can only run floor(10/5)=2 chunks at once, so unlocking
+# 10 chunks via the chain window would let Snakemake schedule out-of-order.
+_max_weight   = max((p.get("gee_weight", 1) for p in PRODUCTS.values()), default=1)
+_max_concurrent = _gee_slots // _max_weight
+_dynamic_window = max(1, _max_concurrent // _num_products)
 CHAIN_PARALLEL_WINDOW = int(config.get("chain_parallel_window", _dynamic_window))
 
 
@@ -36,36 +51,6 @@ RESULTS_DIR        = f"{APP_DIR}/data/runs/{RUN_ID}/results"
 LOGS_DIR           = f"{APP_DIR}/data/runs/{RUN_ID}/logs"
 PREPPED_AOI        = f"{APP_DIR}/data/runs/{RUN_ID}/intermediate/aoi_prepped.parquet"
 
-def infer_time_chunks(settings):
-    """Generate time chunks based on cadence.
-    Annual  → ['YYYY', ...]
-    Monthly → 3-month batches ['YYYY-MM_YYYY-MM', ...], remainder as its own chunk.
-    """
-    chunks = settings.get("time_chunks")
-    if chunks:
-        return chunks
-
-    cadence = settings.get("cadence", "monthly")
-    start = pd.to_datetime(settings["start_date"])
-    end   = pd.to_datetime(settings["end_date"])
-
-    if cadence == "annual":
-        return [str(year) for year in range(start.year, end.year + 1)]
-
-    if cadence == "daily":
-        # One chunk per month: ~30 images × N regions keeps batch sizes manageable.
-        return [dt.strftime("%Y-%m") for dt in pd.date_range(start=start, end=end, freq="MS")]
-
-    if cadence == "composite":
-        # 3-month batches are fine: ~12 images (8-day) or ~6 images (16-day) per chunk.
-        months = [dt.strftime("%Y-%m") for dt in pd.date_range(start=start, end=end, freq="MS")]
-        result = []
-        for i in range(0, len(months), 3):
-            group = months[i:i + 3]
-            result.append(f"{group[0]}_{group[-1]}")
-        return result
-
-    raise ValueError(f"Unsupported cadence: {cadence!r}. Must be one of: annual, daily, composite.")
 
 def get_previous_chunk_output(wildcards):
     """
@@ -108,52 +93,24 @@ rule all:
         get_final_targets()
 
 onsuccess:
-    import yaml, os, json, duckdb
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    run_yaml = f"{APP_DIR}/data/runs/{RUN_ID}/run.yaml"
-    db_path  = f"{APP_DIR}/data/runs/run_state.duckdb"
-    if os.path.exists(run_yaml):
-        with open(run_yaml) as f:
-            meta = yaml.safe_load(f) or {}
-        meta["status"] = "completed"
-        meta["updated_at"] = now
-        meta["last_finished_at"] = now
-        with open(run_yaml, "w") as f:
-            yaml.safe_dump(meta, f, sort_keys=False)
-    if os.path.exists(db_path):
-        try:
-            with duckdb.connect(db_path) as conn:
-                conn.execute(
-                    "INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
-                    [now, RUN_ID, "status_change", "completed", "Run completed successfully", "{}"]
-                )
-        except Exception:
-            pass
+    from workflow.state import update_run_state
+    update_run_state(
+        run_yaml = f"{APP_DIR}/data/runs/{RUN_ID}/run.yaml",
+        db_path  = f"{APP_DIR}/data/runs/run_state.duckdb",
+        run_id   = RUN_ID,
+        status   = "completed",
+        message  = "Run completed successfully"
+    )
 
 onerror:
-    import yaml, os, json, duckdb
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc).isoformat()
-    run_yaml = f"{APP_DIR}/data/runs/{RUN_ID}/run.yaml"
-    db_path  = f"{APP_DIR}/data/runs/run_state.duckdb"
-    if os.path.exists(run_yaml):
-        with open(run_yaml) as f:
-            meta = yaml.safe_load(f) or {}
-        meta["status"] = "failed"
-        meta["updated_at"] = now
-        meta["last_finished_at"] = now
-        with open(run_yaml, "w") as f:
-            yaml.safe_dump(meta, f, sort_keys=False)
-    if os.path.exists(db_path):
-        try:
-            with duckdb.connect(db_path) as conn:
-                conn.execute(
-                    "INSERT INTO run_events (event_time, run_id, event_type, status, message, payload_json) VALUES (?, ?, ?, ?, ?, ?)",
-                    [now, RUN_ID, "status_change", "failed", "Run failed", "{}"]
-                )
-        except Exception:
-            pass
+    from workflow.state import update_run_state
+    update_run_state(
+        run_yaml = f"{APP_DIR}/data/runs/{RUN_ID}/run.yaml",
+        db_path  = f"{APP_DIR}/data/runs/run_state.duckdb",
+        run_id   = RUN_ID,
+        status   = "failed",
+        message  = "Run failed"
+    )
 
 rule preprocess_aoi:
     """
@@ -184,7 +141,8 @@ rule extract_geojson_chunk:
     output:
         geojson = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.geojson"
     resources:
-        gee=1  # Limit parallel GEE requests
+        gee=lambda wildcards: PRODUCTS[wildcards.prod].get("gee_weight", 1)
+    retries: 2  # matches GEE_TIMEOUT_MAX_RETRIES-1; on 3rd timeout the worker shelves the chunk
     threads: 1
     wildcard_constraints:
         # Band names are plain word identifiers — no date-like suffixes — so greedy
@@ -197,20 +155,12 @@ rule extract_geojson_chunk:
         ee_collection = lambda wildcards: PRODUCTS[wildcards.prod].get("ee_collection"),
         multi_collections = lambda wildcards: PRODUCTS[wildcards.prod].get("multi_collections"),
         scale = lambda wildcards: PRODUCTS[wildcards.prod]["scale"],
+        tile_scale = lambda wildcards: PRODUCTS[wildcards.prod].get("tile_scale", 1),
         cadence = lambda wildcards: PRODUCTS[wildcards.prod].get("cadence", "monthly"),
         categorical = lambda wildcards: PRODUCTS[wildcards.prod].get("categorical", False),
-        start_date = lambda wildcards: (
-            f"{wildcards.time_chunk}-01-01"                          # Annual: YYYY
-            if len(wildcards.time_chunk) == 4
-            else f"{wildcards.time_chunk.split('_')[0]}-01"          # Batch: YYYY-MM_YYYY-MM
-        ),
-        end_date = lambda wildcards: (
-            f"{wildcards.time_chunk}-12-31"                          # Annual: YYYY
-            if len(wildcards.time_chunk) == 4
-            else (
-                pd.to_datetime(wildcards.time_chunk.split("_")[-1]) + pd.offsets.MonthEnd(0)
-            ).strftime("%Y-%m-%d")                                   # Batch: last day of end month
-        )
+        qa_mask = lambda wildcards: PRODUCTS[wildcards.prod].get("band_masks", {}).get(wildcards.band),
+        start_date = lambda wc: chunk_start_date(wc.time_chunk),
+        end_date   = lambda wc: chunk_end_date(wc.time_chunk)
     log:
         f"{LOGS_DIR}/{{prod}}/{{band}}_{{time_chunk}}_geojson.log"
     script:

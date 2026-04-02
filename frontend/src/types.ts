@@ -58,7 +58,7 @@ export interface ProductMeta {
   date_min: string        // YYYY-MM-DD
   date_max: string        // YYYY-MM-DD
   resolution_m: number
-  cadence: string         // 'daily' | 'composite' | 'annual'
+  cadence: string         // 'daily' | 'composite' | 'seasonal' | 'annual'
   categorical: boolean
   bands: BandMeta[]
   supported_stats: string[]

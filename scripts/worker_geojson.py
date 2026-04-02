@@ -8,17 +8,25 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 
 import os
+import sys
 import json
+from pathlib import Path
 import re
 import uuid
 import tempfile
 import ee
 import geemap
+from workflow.gee_ops import (
+    apply_qa_mask,
+    build_multi_ndbi_collection,
+    build_reducer,
+    build_compound_reducer,
+    build_daily_stats,
+    build_histogram_stats,
+)
 import geopandas as gpd
 import pandas as pd
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
-import sys
 import threading
 import traceback
 
@@ -62,47 +70,9 @@ def _count_coords(geom):
     return 0
 
 
-# Conservative coordinate budget before GEE's request payload limit (~10 MB of serialized geometry).
-# ~300 k coord pairs × 30 bytes/pair ≈ 9 MB.
-_COORD_BUDGET = 200_000
-# Ordered tolerances tried when the raw AOI exceeds the budget.
+
+# Ordered tolerances tried when the preprocessed AOI still exceeds the budget.
 _SIMPLIFY_LADDER = [0.001, 0.003, 0.01, 0.02, 0.05]
-
-
-def _load_gdf(shp_path):
-    """Read file, normalize CRS to EPSG:4326, assign and deduplicate region_id."""
-    input_path = Path(shp_path)
-    if input_path.suffix.lower() in {".parquet", ".geoparquet"}:
-        gdf = gpd.read_parquet(input_path)
-    else:
-        gdf = gpd.read_file(shp_path)
-
-    if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")
-    else:
-        gdf = gdf.to_crs("EPSG:4326")
-
-    if 'region_id' not in gdf.columns:
-        id_candidates = ['ADMIN', 'NAME', 'ISO_A3', 'NAME_LONG', 'id', 'fid']
-        region_col = next((col for col in id_candidates if col in gdf.columns), None)
-        if region_col:
-            gdf['region_id'] = gdf[region_col].astype(str)
-        else:
-            gdf['region_id'] = gdf.index.astype(str)
-
-    if gdf['region_id'].duplicated().any():
-        counts = {}
-        new_ids = []
-        for rid in gdf['region_id']:
-            if rid in counts:
-                counts[rid] += 1
-                new_ids.append(f"{rid}_{counts[rid]}")
-            else:
-                counts[rid] = 0
-                new_ids.append(rid)
-        gdf['region_id'] = new_ids
-
-    return gdf
 
 
 def _split_attrs(gdf):
@@ -119,36 +89,6 @@ def _split_attrs(gdf):
     )
     return gdf[['region_id', geom_col]].copy(), attr_lookup
 
-
-def _simplify_to_budget(gdf_slim, budget=_COORD_BUDGET):
-    """
-    Measure AOI coordinate count and apply the minimum simplification tolerance
-    needed to stay within the GEE payload budget — without any GEE round trips.
-
-    Returns (gdf_ready, tolerance_used):
-    - gdf_ready:       GeoDataFrame ready to send to GEE
-    - tolerance_used:  the Shapely tolerance applied, or None if no simplification was needed
-    """
-    total = sum(_count_coords(g) for g in gdf_slim.geometry)
-    log_progress(f"Geometry complexity: {total:,} total coordinates (budget: {budget:,})")
-
-    if total <= budget:
-        return gdf_slim, None
-
-    log_progress(f"Coord count exceeds budget — selecting minimum simplification tolerance")
-    for tol in _SIMPLIFY_LADDER:
-        candidate = gdf_slim.copy()
-        candidate["geometry"] = candidate.geometry.simplify(tol, preserve_topology=True)
-        candidate = candidate[~candidate.geometry.is_empty & candidate.geometry.notna()]
-        reduced = sum(_count_coords(g) for g in candidate.geometry)
-        log_progress(f"  tolerance={tol}: {reduced:,} coords")
-        if reduced <= budget:
-            log_progress(f"Selected tolerance={tol} ({total:,} → {reduced:,} coords, "
-                         f"{100 * (1 - reduced / total):.0f}% reduction)")
-            return candidate, tol
-
-    log_progress(f"WARNING: Still above budget after maximum tolerance={_SIMPLIFY_LADDER[-1]}")
-    return candidate, _SIMPLIFY_LADDER[-1]
 
 
 def _gdf_to_ee(gdf_slim):
@@ -245,117 +185,6 @@ def _blocking_getinfo(ee_obj, interval=30, label=None):
         raise exc_box[0]
     return result_box[0]
 
-# Landsat Collection 2 Level-2 surface reflectance scale factors.
-# Applied before computing NDBI so the additive offset doesn't cancel incorrectly.
-_LS_SCALE  = 0.0000275
-_LS_OFFSET = -0.2
-
-
-def _build_multi_ndbi_collection(multi_collections, start, end_dt):
-    """
-    Merge multiple Landsat sensors into a single 'NDBI' ImageCollection covering
-    [start, end_dt) (both strings, end_dt exclusive as expected by GEE filterDate).
-
-    Each sensor dict must contain:
-        id         – GEE ImageCollection asset ID
-        date_start – first usable date for this sensor (inclusive, YYYY-MM-DD)
-        date_end   – last usable date for this sensor  (inclusive, YYYY-MM-DD)
-        swir_band  – SWIR band name in the raw collection
-        nir_band   – NIR  band name in the raw collection
-
-    NDBI = (SWIR_ref − NIR_ref) / (SWIR_ref + NIR_ref)
-    where *_ref = DN × 0.0000275 + (−0.2)  (Landsat C02 L2 scale factors).
-    """
-    merged = None
-    for sensor in multi_collections:
-        # Convert inclusive sensor end-date to exclusive for GEE filterDate.
-        sensor_end_excl = (
-            datetime.strptime(sensor["date_end"], "%Y-%m-%d") + timedelta(days=1)
-        ).strftime("%Y-%m-%d")
-
-        # Intersect the sensor's operational window with this chunk's window.
-        seg_start = max(start, sensor["date_start"])
-        seg_end   = min(end_dt, sensor_end_excl)
-        if seg_start >= seg_end:
-            continue  # Sensor has no imagery in this time chunk.
-
-        swir_name = sensor["swir_band"]
-        nir_name  = sensor["nir_band"]
-
-        def _to_ndbi(img, swir=swir_name, nir=nir_name):
-            swir_ref = img.select(swir).multiply(_LS_SCALE).add(_LS_OFFSET)
-            nir_ref  = img.select(nir).multiply(_LS_SCALE).add(_LS_OFFSET)
-            ndbi = (
-                swir_ref.subtract(nir_ref)
-                .divide(swir_ref.add(nir_ref))
-                .rename("NDBI")
-            )
-            return ndbi.copyProperties(img, ["system:time_start", "system:index"])
-
-        seg_col = (
-            ee.ImageCollection(sensor["id"])
-            .filterDate(seg_start, seg_end)
-            .map(_to_ndbi)
-        )
-        merged = seg_col if merged is None else merged.merge(seg_col)
-
-    return merged
-
-
-def build_reducer(stat_name):
-    """Return the EE reducer for a given stat name."""
-    return {
-        "SUM":    ee.Reducer.sum(),
-        "MEAN":   ee.Reducer.mean(),
-        "MAX":    ee.Reducer.max(),
-        "MIN":    ee.Reducer.min(),
-        "MEDIAN": ee.Reducer.median(),
-    }.get(stat_name.upper(), ee.Reducer.mean())
-
-
-def build_compound_reducer(stats_list):
-    """
-    Build a compound reducer for all configured stats.
-    For a single stat returns that reducer directly.
-    For multiple stats combines them with sharedInputs=True so all receive
-    the same input band and each outputs a separate '{band}_{stat}' property.
-    """
-    if len(stats_list) == 1:
-        return build_reducer(stats_list[0])
-    base = build_reducer(stats_list[0])
-    for s in stats_list[1:]:
-        base = base.combine(build_reducer(s), sharedInputs=True)
-    return base
-
-
-def build_daily_stats(collection, regions, scale, spatial_reducer):
-    """Map reduceRegions over each image in the collection, tagging each feature with its Date."""
-    def reduce_image(img):
-        date_str = img.date().format("YYYY-MM-dd")
-        return img.reduceRegions(
-            collection=regions,
-            reducer=spatial_reducer,
-            scale=scale,
-            crs='EPSG:4326'
-        ).map(lambda f: f.set("Date", date_str))
-    return collection.map(reduce_image).flatten()
-
-
-def build_histogram_stats(collection, regions, scale, band):
-    """
-    Compute per-class pixel counts for a categorical (LULC) band using frequencyHistogram.
-    Returns a FeatureCollection where each feature has a '{band}' property containing
-    a dict of {class_value: pixel_count, ...}.
-    """
-    image = collection.mosaic().select([band])
-    return image.reduceRegions(
-        collection=regions,
-        reducer=ee.Reducer.frequencyHistogram(),
-        scale=scale,
-        crs='EPSG:4326'
-    )
-
-
 def export_to_geojson(image, regions, scale, out_geojson, max_retries=5, prop_rename=None,
                       precomputed_stats=None, categorical=False, attr_lookup=None, extra_props=None):
     """
@@ -379,24 +208,23 @@ def export_to_geojson(image, regions, scale, out_geojson, max_retries=5, prop_re
     # Export to GeoJSON with retries
     for attempt in range(max_retries):
         try:
-            # Paginate getInfo() to handle collections with >5000 features.
-            # stats.size().getInfo() forces GEE to fully evaluate the computation
-            # graph on the server before returning. For high-resolution categorical
-            # products (e.g. frequencyHistogram at 10m) this can take several minutes
-            # with no per-page progress possible — _blocking_getinfo emits a heartbeat.
+            # Paginate via toList() until an empty page is returned.
+            # Avoids calling stats.size().getInfo() which forces GEE to fully evaluate
+            # the entire computation graph before the first byte of data arrives.
             PAGE_SIZE = 5000
-            log_progress("Evaluating collection on GEE server — heartbeat every 30s until done...")
-            total = _blocking_getinfo(stats.size(), label="size()")
-            log_progress(f"Collection has {total} features, fetching in pages of {PAGE_SIZE}")
-            num_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE if total else 1
             features = []
-            for page_idx, offset in enumerate(range(0, total, PAGE_SIZE), start=1):
-                page_label = f"page {page_idx}/{num_pages}"
-                page = _blocking_getinfo(stats.toList(PAGE_SIZE, offset), label=page_label)
+            offset = 0
+            page_idx = 0
+            while True:
+                page_idx += 1
+                page = _blocking_getinfo(stats.toList(PAGE_SIZE, offset), label=f"page {page_idx}")
+                if not page:
+                    break
                 features.extend(page)
-                fetched = min(offset + PAGE_SIZE, total)
-                pct = int(fetched / total * 100) if total else 100
-                log_progress(f"Fetched {fetched}/{total} features ({pct}%)")
+                log_progress(f"Fetched {len(features)} features so far (page {page_idx})")
+                if len(page) < PAGE_SIZE:
+                    break
+                offset += PAGE_SIZE
 
             # Rename reducer output properties to expected {band}_{stat} convention.
             # GEE reduceRegions names output properties after the reducer (e.g. 'mean'),
@@ -477,11 +305,13 @@ try:
     col_id            = snakemake.params.ee_collection
     multi_collections = snakemake.params.multi_collections
     scale             = snakemake.params.scale
+    tile_scale        = snakemake.params.tile_scale
     stats_list        = snakemake.params.stats
     start             = snakemake.params.start_date
     end               = snakemake.params.end_date
     cadence           = snakemake.params.cadence
     categorical       = snakemake.params.categorical
+    qa_mask           = snakemake.params.qa_mask   # None or QA mask config dict
     band       = snakemake.wildcards.band
     prod       = getattr(snakemake.wildcards, "prod", "")
     time_chunk = getattr(snakemake.wildcards, "time_chunk", "")
@@ -490,7 +320,7 @@ try:
 
     # Annual only: stamp the chunk start date as Date (one value per region per year).
     # Daily and composite: GEE sets Date per image via build_daily_stats.
-    extra_props = {"Date": start} if cadence == "annual" else None
+    extra_props = {"Date": start} if cadence in ("annual", "seasonal") else None
 
     log_progress(f"Parameters: collection={col_id}, band={band}, stats={stats_list}, cadence={cadence}, dates={start} to {end}")
 
@@ -503,19 +333,47 @@ try:
     del gdf_full
     gdf_original = gdf_slim  # keep for empty-feature fallback
 
-    regions = _gdf_to_ee(gdf_slim)
+    # Simplify region geometries to match the product's native scale before
+    # embedding in GEE.  Boundaries finer than the pixel size don't affect
+    # zonal statistics — GEE samples at `scale` metres anyway — but every
+    # extra coordinate inflates the value:compute request payload.
+    # 1° ≈ 111 000 m, so tolerance = scale_m / 111 000 converts metres to degrees.
+    gee_tolerance = scale / 111_000
+    if gee_tolerance > 0.003:
+        # Only re-simplify when the product scale is coarser than the AOI prep
+        # tolerance (0.003°); otherwise use the prepped geometry as-is.
+        gdf_for_gee = gdf_slim.copy()
+        gdf_for_gee.geometry = gdf_slim.geometry.simplify(gee_tolerance)
+    else:
+        gdf_for_gee = gdf_slim
+    regions = _gdf_to_ee(gdf_for_gee)
     log_progress(f"Regions built: {len(gdf_slim)} features")
+
+    # Build a compact filter geometry in Python (no GEE lazy reference).
+    # Only used for filterBounds — excludes scenes with no real overlap.
+    # Simplified very aggressively (0.5°≈55km): Landsat scenes are 185km wide
+    # so this level of precision is more than sufficient for scene filtering,
+    # and keeps the serialized geometry to a few KB regardless of AOI complexity.
+    # The full regions FeatureCollection is still used for reduceRegions.
+    # Use a bounding-box filter region — always valid for ee.Geometry.BBox,
+    # immune to degenerate geometries from aggressive simplification, and
+    # sufficient for filterBounds (scene selection only, not analysis).
+    minx, miny, maxx, maxy = gdf_slim.geometry.unary_union.bounds
+    filter_region = ee.Geometry.BBox(minx, miny, maxx, maxy)
 
     end_dt = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
     log_progress("Filtering image collection")
     if multi_collections:
-        collection = _build_multi_ndbi_collection(multi_collections, start, end_dt)
+        # NDBI: masking is applied per-sensor inside build_multi_ndbi_collection.
+        collection = build_multi_ndbi_collection(multi_collections, start, end_dt, region=filter_region)
         if collection is None:
-            collection = ee.ImageCollection([])  # No sensors active in this chunk
-        else:
-            collection = collection.filterBounds(regions)
+            collection = ee.ImageCollection([])  # No sensors active in this chunk  # type: ignore[assignment]
     else:
-        collection = ee.ImageCollection(col_id).filterDate(start, end_dt).select([band]).filterBounds(regions)
+        collection = ee.ImageCollection(col_id).filterDate(start, end_dt).filterBounds(filter_region)
+        if qa_mask is not None:
+            log_progress(f"Applying QA bit-mask: band={qa_mask['band']}, tests={qa_mask['tests']}")
+            collection = collection.map(lambda img: apply_qa_mask(img, qa_mask))
+        collection = collection.select([band])
 
     collection_count = _blocking_getinfo(collection.size(), label="size()")
     log_progress(f"Collection has {collection_count} images")
@@ -572,7 +430,7 @@ try:
             # Composite products (e.g. MODIS 8-day, Landsat 16-day) have their own
             # acquisition date per image, so treat them the same as daily.
             compound = build_compound_reducer(stats_list)
-            stats_fc = build_daily_stats(collection, regions_fc, scale, compound)
+            stats_fc = build_daily_stats(collection, regions_fc, scale, compound, tile_scale)
             return export_to_geojson(
                 image=None, regions=regions_fc, scale=scale, out_geojson=out,
                 max_retries=max_retries, prop_rename=prop_rename,

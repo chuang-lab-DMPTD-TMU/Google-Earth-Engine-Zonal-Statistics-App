@@ -1,17 +1,17 @@
-# --- Credentials (NEVER commit these) ---
+# --- Credentials ---
 config/gee-key.json
 *.json
 !package.json
 .env
 .env.*
-*.parquet
 
-# --- Generated data (large, run-specific) ---
-data/runs/
-
+# --- Generated data ---
+data/
+.tmp/
 
 # --- Node / frontend ---
 frontend/node_modules/
+frontend/dist/
 
 # --- Pixi ---
 .pixi/
@@ -22,10 +22,15 @@ pixi.lock
 
 # --- Python ---
 __pycache__/
+**/__pycache__/
+*.pyc
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
+
+# --- Git ---
+.git/
 
 # --- OS / editor ---
 .DS_Store
@@ -33,9 +38,8 @@ Thumbs.db
 .idea/
 .vscode/
 .claude/
+.devcontainer/
 
-
-# --- DuckDB temp files ---
-.tmp/
-*.duckdb
-*.duckdb.wal
+# --- Misc ---
+.pytest_cache/
+*.log

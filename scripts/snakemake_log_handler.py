@@ -1,9 +1,6 @@
 """
 Snakemake --log-handler-script for the GEE batch processor.
 
-Snakemake calls log_handler(log) in this module for every internal event.
-We use it to keep the DuckDB jobs table up to date in real time so the
-Streamlit UI can show accurate per-job status without relying on file counting.
 
 State machine per job:
     pending  →  running   (job_info fires)
@@ -192,11 +189,14 @@ def _dispatch(log: dict):
             log_files = log.get("log") or []
             log_path  = log_files[0] if log_files else None
             if jobid is not None and log_path:
-                jid = int(jobid)
-                threading.Thread(
-                    target=lambda jid=jid, lp=log_path, pfx=f"merge/{prod}": _start_tail(jid, lp, pfx, _merge_line_filter),
-                    daemon=True,
-                ).start()
+                _start_tail(int(jobid), log_path, f"merge/{prod}", _merge_line_filter)
+            return
+
+        if rule == "preprocess_aoi":
+            log_files = log.get("log") or []
+            log_path  = log_files[0] if log_files else None
+            if jobid is not None and log_path:
+                _start_tail(int(jobid), log_path, "preprocess_aoi")
             return
 
         # Only track the GEE extraction step for job status — convert_to_parquet
@@ -212,11 +212,7 @@ def _dispatch(log: dict):
         if rule == "convert_to_parquet":
             # Tail conversion logs (key lines only); do not touch job status in DuckDB.
             if jobid is not None and log_path:
-                jid = int(jobid)
-                threading.Thread(
-                    target=lambda jid=jid, lp=log_path, pfx=f"{band}/{chunk}:parquet": _start_tail(jid, lp, pfx, _parquet_line_filter),
-                    daemon=True,
-                ).start()
+                _start_tail(int(jobid), log_path, f"{band}/{chunk}:parquet", _parquet_line_filter)
             return
 
         if jobid is not None and prod and band and chunk:
@@ -224,10 +220,7 @@ def _dispatch(log: dict):
             _job_map[jid] = {"prod": prod, "band": band, "chunk": chunk}
             _upsert_job(prod, band, chunk, "running", jobid=jid, log_path=log_path)
             if log_path:
-                threading.Thread(
-                    target=lambda jid=jid, lp=log_path, pfx=f"{band}/{chunk}": _start_tail(jid, lp, pfx),
-                    daemon=True,
-                ).start()
+                _start_tail(jid, log_path, f"{band}/{chunk}")
 
     # ── job failed ────────────────────────────────────────────────────────────
     elif level == "job_error":

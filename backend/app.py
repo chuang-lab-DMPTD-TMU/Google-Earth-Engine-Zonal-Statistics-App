@@ -6,6 +6,10 @@ run_state.duckdb and resume runs started by either interface.
 """
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 import calendar
 import io
 import json
@@ -16,14 +20,12 @@ import secrets
 import signal
 import string
 import subprocess
-import sys
 import threading
 import tempfile
 import time
 import uuid
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
 
 import duckdb
@@ -35,6 +37,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from workflow.products import PRODUCT_REGISTRY
+from workflow.time_chunks import get_time_chunks
+
 
 # ─── Paths ────────────────────────────────────────────────────────────────────
 
@@ -49,7 +54,7 @@ GEE_KEY_PATH  = Path(
     )
 ).resolve()
 APP_DIR       = Path(__file__).parent.parent        # repo root
-SNAKEFILE     = APP_DIR / "Snakefile_parquet"
+SNAKEFILE     = APP_DIR / "Snakefile"
 LOG_HANDLER   = APP_DIR / "scripts" / "snakemake_log_handler.py"
 RUN_DB_PATH   = RUNS_DIR / "run_state.duckdb"
 
@@ -59,172 +64,8 @@ log = logging.getLogger(__name__)
 for d in [RUNS_DIR, CONFIG_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-# ─── Product registry (must match main.py exactly) ────────────────────────────
-
 _REQUIRED_KEY_FIELDS = {"type", "project_id", "private_key", "client_email", "token_uri"}
 
-PRODUCT_REGISTRY: dict[str, dict] = {
-    "CHIRPS": {
-        "ee_collection": "UCSB-CHG/CHIRPS/DAILY",
-        "min_date": "1981-01-01",
-        "max_date": "2026-02-28",
-        "scale": 5566,
-        "cadence": "daily",
-        "categorical": False,
-        "content": {
-            "precipitation": {"stats": ["sum", "mean", "max"], "default_stats": ["sum"]},
-        },
-        "label": "CHIRPS Daily Precipitation",
-        "description": "Global precipitation (0.05° resolution).",
-        "resolution_m": 5566,
-    },
-    "ERA5_LAND": {
-        "ee_collection": "ECMWF/ERA5_LAND/DAILY_AGGR",
-        "min_date": "1950-01-01",
-        "max_date": "2026-02-28",
-        "scale": 9000,
-        "cadence": "daily",
-        "categorical": False,
-        "content": {
-            "temperature_2m":               {"stats": ["mean", "min", "max"], "default_stats": ["mean"]},
-            "temperature_2m_min":           {"stats": ["mean", "min", "max"], "default_stats": ["mean"]},
-            "temperature_2m_max":           {"stats": ["mean", "min", "max"], "default_stats": ["mean"]},
-            "total_precipitation_sum":      {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-            "total_evaporation_sum":        {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-            "potential_evaporation_sum":    {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-            "snow_evaporation_sum":         {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-            "evaporation_from_bare_soil_sum": {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-            "evaporation_from_open_water_surfaces_excluding_oceans_sum": {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-            "evaporation_from_the_top_of_canopy_sum": {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-            "evaporation_from_vegetation_transpiration_sum": {"stats": ["sum", "mean"], "default_stats": ["sum"]},
-        },
-        "label": "ERA5-Land Climate",
-        "description": "Reanalysis data for land variables (9km resolution).",
-        "resolution_m": 9000,
-    },
-    "MODIS_LST": {
-        "ee_collection": "MODIS/061/MOD11A2",
-        "min_date": "2000-02-18",
-        "max_date": "2026-02-10",
-        "scale": 1000,
-        "cadence": "composite",
-        "categorical": False,
-        "content": {
-            "LST_Day_1km":   {"stats": ["mean", "median", "max"], "default_stats": ["mean"]},
-            "LST_Night_1km": {"stats": ["mean", "median", "max"], "default_stats": ["mean"]},
-        },
-        "label": "MODIS Land Surface Temperature",
-        "description": "Land Surface Temperature (1km resolution).",
-        "resolution_m": 1000,
-    },
-    "MODIS_NDVI_EVI": {
-        "ee_collection": "MODIS/061/MOD13Q1",
-        "min_date": "2000-02-18",
-        "max_date": "2026-02-02",
-        "scale": 250,
-        "cadence": "composite",
-        "categorical": False,
-        "content": {
-            "NDVI": {"stats": ["mean", "median"], "default_stats": ["mean"]},
-            "EVI":  {"stats": ["mean", "median"], "default_stats": ["mean"]},
-        },
-        "label": "MODIS NDVI / EVI",
-        "description": "Vegetation Indices (250m resolution).",
-        "resolution_m": 250,
-    },
-    "WorldCover_v100": {
-        "ee_collection": "ESA/WorldCover/v100",
-        "min_date": "2020-01-01",
-        "max_date": "2020-12-31",
-        "scale": 500,
-        "cadence": "annual",
-        "categorical": True,
-        "content": {
-            "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
-        },
-        "label": "ESA WorldCover 2020 (v1.0)",
-        "description": "Aggregated to 500m - ESA WorldCover landcover classification v100 (10m, 2020).",
-        "resolution_m": 10,
-    },
-    "WorldCover_v200": {
-        "ee_collection": "ESA/WorldCover/v200",
-        "min_date": "2021-01-01",
-        "max_date": "2021-12-31",
-        "scale": 500,
-        "cadence": "annual",
-        "categorical": True,
-        "content": {
-            "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
-        },
-        "label": "ESA WorldCover 2021 (v2.0)",
-        "description": "Aggregated to 500m - ESA WorldCover landcover classification v200 (10m, 2021).",
-        "resolution_m": 10,
-    },
-    "MODIS_LULC": {
-        "ee_collection": "MODIS/061/MCD12Q1",
-        "min_date": "2001-01-01",
-        "max_date": "2023-12-31",
-        "scale": 500,
-        "cadence": "annual",
-        "categorical": True,
-        "content": {
-            "LC_Type1": {"stats": ["histogram"], "default_stats": ["histogram"]},
-            "LC_Type2": {"stats": ["histogram"], "default_stats": ["histogram"]},
-            "LC_Type3": {"stats": ["histogram"], "default_stats": ["histogram"]},
-            "LC_Type4": {"stats": ["histogram"], "default_stats": ["histogram"]},
-            "LC_Type5": {"stats": ["histogram"], "default_stats": ["histogram"]},
-        },
-        "label": "MODIS Land Use / Land Cover",
-        "description": "MODIS Land Cover Type (500m resolution, annual, multiple schemes).",
-        "resolution_m": 500,
-    },
-    "NDBI": {
-        # No single ee_collection — worker uses multi_collections to build a merged NDBI series.
-        "ee_collection": None,
-        "multi_collections": [
-            {
-                # LT05 routine operations suspended 2011-11-18 after a power anomaly;
-                # no usable imagery after November 2011.
-                "id":         "LANDSAT/LT05/C02/T1_L2",
-                "date_start": "1984-01-01",
-                "date_end":   "2011-11-30",
-                "swir_band":  "SR_B5",
-                "nir_band":   "SR_B4",
-            },
-            {
-                # LE07 (SLC-off since 2003 but usable) bridges LT05 end to LC08 start.
-                "id":         "LANDSAT/LE07/C02/T1_L2",
-                "date_start": "2011-12-01",
-                "date_end":   "2013-04-10",
-                "swir_band":  "SR_B5",
-                "nir_band":   "SR_B4",
-            },
-            {
-                # LC08 first operational data: 2013-04-11.
-                "id":         "LANDSAT/LC08/C02/T1_L2",
-                "date_start": "2013-04-11",
-                "date_end":   "2025-12-31",
-                "swir_band":  "SR_B6",
-                "nir_band":   "SR_B5",
-            },
-        ],
-        "min_date": "1984-01-01",
-        "max_date": "2025-12-31",
-        "scale": 250,
-        "cadence": "composite",
-        "categorical": False,
-        "content": {
-            "NDBI": {"stats": ["mean", "median"], "default_stats": ["mean"]},
-        },
-        "label": "NDBI (Landsat 5 / 7 / 8)",
-        "description": (
-            "Aggregated to 250m - Normalized Difference Built-up Index (30m, per-scene). "
-            "Landsat 5 TM 1984–Nov 2011, Landsat 7 ETM+ (SLC-off) Dec 2011–Apr 2013, "
-            "Landsat 8 OLI Apr 2013–2025. Formula: (SWIR − NIR) / (SWIR + NIR)."
-        ),
-        "resolution_m": 30,
-    },
-}
 
 # ─── App ──────────────────────────────────────────────────────────────────────
 
@@ -258,36 +99,6 @@ class RetryRunRequest(BaseModel):
 class ResumeRunRequest(BaseModel):
     gee_concurrency: int | None = None  # None → SIGCONT with no change
 
-# ─── Time chunk helpers (mirrors main.py) ─────────────────────────────────────
-
-def _month_list(start_str: str, end_str: str) -> list[str]:
-    start = datetime.strptime(start_str, "%Y-%m-%d")
-    end   = datetime.strptime(end_str,   "%Y-%m-%d")
-    months, curr = [], start.replace(day=1)
-    while curr <= end:
-        months.append(curr.strftime("%Y-%m"))
-        curr = curr.replace(month=curr.month + 1) if curr.month < 12 else curr.replace(year=curr.year + 1, month=1)
-    return months
-
-def _quarterly_chunks(start_str: str, end_str: str) -> list[str]:
-    months = _month_list(start_str, end_str)
-    chunks = []
-    for i in range(0, len(months), 3):
-        g = months[i:i + 3]
-        chunks.append(f"{g[0]}_{g[-1]}")
-    return chunks
-
-def _year_list(start_str: str, end_str: str) -> list[str]:
-    s, e = datetime.strptime(start_str, "%Y-%m-%d"), datetime.strptime(end_str, "%Y-%m-%d")
-    return [str(y) for y in range(s.year, e.year + 1)]
-
-def get_time_chunks(start_str: str, end_str: str, cadence: str) -> list[str]:
-    if cadence == "annual":
-        return _year_list(start_str, end_str)
-    if cadence == "daily":
-        return _month_list(start_str, end_str)
-    # composite / monthly → quarterly batches
-    return _quarterly_chunks(start_str, end_str)
 
 # ─── DuckDB helpers (schema mirrors main.py) ──────────────────────────────────
 
@@ -565,7 +376,12 @@ def _is_pid_alive(pid: int | None) -> bool:
         return False
     try:
         os.kill(int(pid), 0)
-        return True
+    except Exception:
+        return False
+    # Confirm the PID still belongs to a snakemake/python process, not a reused PID.
+    try:
+        cmdline = Path(f"/proc/{int(pid)}/cmdline").read_text().replace("\x00", " ").lower()
+        return "snakemake" in cmdline or "python" in cmdline
     except Exception:
         return False
 
@@ -1001,6 +817,8 @@ def submit_run(body: SubmitRunRequest):
         run_id = "".join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(6))
 
     run_dir = RUNS_DIR / run_id
+    if (run_dir / "run.yaml").exists():
+        raise HTTPException(409, f"Run '{run_id}' already exists. Choose a different run ID.")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # Find the AOI file saved under inputs/
@@ -1035,6 +853,13 @@ def submit_run(body: SubmitRunRequest):
             "start_date":       pc.date_start,
             "end_date":         dt_end.strftime("%Y-%m-%d"),
             "time_chunks":      time_chunks,
+            "gee_weight":       info.get("gee_weight", 1),
+            "tile_scale":       info.get("tile_scale", 1),
+            # Per-band QA bit-mask configs (None for bands/products with no masking).
+            "band_masks":       {
+                band: info.get("content", {}).get(band, {}).get("qa_mask")
+                for band in pc.bands
+            },
         }
 
     payload = {
