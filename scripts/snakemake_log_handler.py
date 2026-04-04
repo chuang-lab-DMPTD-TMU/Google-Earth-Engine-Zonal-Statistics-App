@@ -74,6 +74,8 @@ def _tail_job_log(log_path: str, stop: threading.Event, prefix: str, line_filter
 
     Opens and closes the file on each poll cycle so Windows does not hold a
     lock that prevents Snakemake from deleting the log before re-running a job.
+    If the file is deleted and recreated (e.g. on a Snakemake-triggered restart),
+    the tracked read position is reset so the new file is tailed from the start.
     """
     # Wait for the file to appear — heavy workers (ee + geopandas imports) can
     # take several seconds before writing their first log line.
@@ -83,16 +85,35 @@ def _tail_job_log(log_path: str, stop: threading.Event, prefix: str, line_filter
             return
         time.sleep(0.5)
 
-    try:
-        with _open_log_shared(log_path) as fh:
-            while not stop.is_set():
-                line = fh.readline()
-                if line:
+    pos = 0  # byte offset into the current file
+    while not stop.is_set():
+        try:
+            with _open_log_shared(log_path) as fh:
+                # Detect file recreation: if the file is now shorter than our
+                # tracked position, Snakemake deleted it and the worker wrote a
+                # new one — reset so we tail from the beginning of the new file.
+                fh.seek(0, 2)
+                if fh.tell() < pos:
+                    pos = 0
+                fh.seek(pos)
+                while True:
+                    line = fh.readline()
+                    if not line:
+                        break
                     if line_filter is None or line_filter(line):
                         print(f"[job:{prefix}] {line}", end="", flush=True)
-                else:
-                    stop.wait(2)
-            # Drain any final lines after the job finishes.
+                pos = fh.tell()
+        except OSError:
+            pass  # file transiently absent between deletion and recreation
+        stop.wait(2)
+
+    # Drain any final lines written after the job finished.
+    try:
+        with _open_log_shared(log_path) as fh:
+            fh.seek(0, 2)
+            if fh.tell() < pos:
+                pos = 0
+            fh.seek(pos)
             for line in fh:
                 if line_filter is None or line_filter(line):
                     print(f"[job:{prefix}] {line}", end="", flush=True)
