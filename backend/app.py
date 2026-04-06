@@ -1,8 +1,6 @@
 """
 GEE Web App – FastAPI backend
 
-DB schema is intentionally compatible with main.py so both can share the same
-run_state.duckdb and resume runs started by either interface.
 """
 from __future__ import annotations
 
@@ -100,7 +98,7 @@ class ResumeRunRequest(BaseModel):
     gee_concurrency: int | None = None  # None → SIGCONT with no change
 
 
-# ─── DuckDB helpers (schema mirrors main.py) ──────────────────────────────────
+# ─── DuckDB helpers  ──────────────────────────────────
 
 def _duckdb_connect(retries: int = 8, delay: float = 0.25) -> duckdb.DuckDBPyConnection:
     last_exc = None

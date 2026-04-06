@@ -73,7 +73,32 @@ def merge_parquet_chunks_to_output(chunk_files, output_file: Path):
             ]
             union_parts.append(f"SELECT {', '.join(exprs)} FROM chunk_{idx}")
 
-        conn.execute(f"CREATE TABLE merged AS {' UNION ALL '.join(union_parts)}")
+        conn.execute(f"CREATE TABLE long_all AS {' UNION ALL '.join(union_parts)}")
+
+        # Pivot: GROUP BY (region_id, Date) so each band's NULL-padded rows are
+        # collapsed into a single wide row with all band columns populated.
+        join_keys = [k for k in ("region_id", "Date") if k in all_col_names]
+        if join_keys:
+            col_types = {
+                row[1]: row[2].upper()
+                for row in conn.execute("PRAGMA table_info('long_all')").fetchall()
+            }
+            select_parts = []
+            for c in all_col_names:
+                q = sql_quote_ident(c)
+                if c in join_keys:
+                    select_parts.append(q)
+                elif "GEOMETRY" in col_types.get(c, ""):
+                    select_parts.append(f"ANY_VALUE({q}) AS {q}")
+                else:
+                    select_parts.append(f"MAX({q}) AS {q}")
+            group_clause = ", ".join(sql_quote_ident(k) for k in join_keys)
+            conn.execute(
+                f"CREATE TABLE merged AS "
+                f"SELECT {', '.join(select_parts)} FROM long_all GROUP BY {group_clause}"
+            )
+        else:
+            conn.execute("CREATE TABLE merged AS SELECT * FROM long_all")
 
         sort_cols = []
         merged_cols = [row[1] for row in conn.execute("PRAGMA table_info('merged')").fetchall()]

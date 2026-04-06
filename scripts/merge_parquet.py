@@ -24,11 +24,7 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_fi
     def _log(message):
         log_progress(message, log_file, quiet)
 
-    import tempfile
-    fd, tmp_db = tempfile.mkstemp(suffix=".duckdb")
-    os.close(fd)
-    os.unlink(tmp_db)
-    conn = duckdb.connect(tmp_db, config={"storage_compatibility_version": "v1.5.0"})
+    conn = duckdb.connect(":memory:")
     try:
         conn.execute("INSTALL spatial;")
         conn.execute("LOAD spatial;")
@@ -46,51 +42,37 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_fi
 
         if merge_strategy == "wide":
             _log("Performing WIDE merge (bands as columns)")
+            _log(f"Loaded {total}/{total} chunks (100%)")
 
-            # Read schemas without loading data
-            all_schemas = {}
-            report_at = {max(1, total // 4), max(1, total // 2), max(1, 3 * total // 4), total}
-            for idx, chunk_file in enumerate(chunk_files):
-                cols = [
-                    row[0] for row in
-                    conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{chunk_file}')").fetchall()
-                ]
-                all_schemas[idx] = cols
-                loaded = idx + 1
-                if loaded in report_at:
-                    _log(f"Loaded {loaded}/{total} chunks ({loaded * 100 // total}%)")
+            # Step 1: UNION ALL chunks with union_by_name so every band column appears,
+            # NULL-padded in rows that belong to a different band.
+            conn.execute(
+                f"CREATE TABLE long_all AS "
+                f"SELECT * FROM read_parquet({file_list_sql}, union_by_name=true)"
+            )
 
             join_keys = [k for k in ['region_id', 'Date'] if k in first_cols]
             if not join_keys:
                 _log("WARNING: No join keys found, falling back to LONG merge.")
-                common_cols = set.intersection(*[set(c) for c in all_schemas.values()])
-                col_list = ", ".join(sorted(common_cols))
-                merged_query = (
-                    f"SELECT {col_list} FROM read_parquet({file_list_sql}, union_by_name=true)"
-                )
+                merged_query = "SELECT * FROM long_all"
             else:
-                accumulated_cols = set(first_cols)
-                join_clauses = []
-                select_extras = []
-
-                for idx in range(1, len(chunk_files)):
-                    chunk_cols = all_schemas[idx]
-                    new_cols = [c for c in chunk_cols if c not in accumulated_cols and c not in join_keys]
-                    if not new_cols:
-                        continue
-                    join_on = " AND ".join([f"c0.{k} = c{idx}.{k}" for k in join_keys])
-                    join_clauses.append(
-                        f"LEFT JOIN read_parquet('{chunk_files[idx]}') c{idx} ON {join_on}"
-                    )
-                    select_extras.extend([f"c{idx}.{c}" for c in new_cols])
-                    accumulated_cols.update(new_cols)
-
-                base_cols = ", ".join([f"c0.{c}" for c in first_cols])
-                extra_cols = (", " + ", ".join(select_extras)) if select_extras else ""
+                # Step 2: Pivot — GROUP BY join keys and collapse each band's NULL-padded
+                # rows into a single wide row.  MAX() picks the one non-NULL value for
+                # numeric/text band columns; ANY_VALUE() is used for geometry.
+                all_col_info = conn.execute("DESCRIBE long_all").fetchall()
+                select_parts = []
+                for col_name, col_type, *_ in all_col_info:
+                    q = f'"{col_name}"'
+                    if col_name in join_keys:
+                        select_parts.append(q)
+                    elif 'GEOMETRY' in col_type.upper():
+                        select_parts.append(f'ANY_VALUE({q}) AS {q}')
+                    else:
+                        select_parts.append(f'MAX({q}) AS {q}')
+                group_clause = ', '.join(f'"{k}"' for k in join_keys)
                 merged_query = (
-                    f"SELECT {base_cols}{extra_cols} "
-                    f"FROM read_parquet('{chunk_files[0]}') c0 "
-                    + " ".join(join_clauses)
+                    f"SELECT {', '.join(select_parts)} FROM long_all "
+                    f"GROUP BY {group_clause}"
                 )
 
         else:
@@ -145,10 +127,6 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_fi
         raise
     finally:
         conn.close()
-        try:
-            os.remove(tmp_db)
-        except OSError:
-            pass
 
 if __name__ == "__main__":
     # Support both script and Snakemake usage

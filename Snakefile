@@ -79,12 +79,11 @@ def get_previous_chunk_output(wildcards):
 
 
 def get_final_targets():
-    """Define final output files: merged GeoParquet + cleanup marker per product."""
+    """Define final output files: merged GeoParquet per product."""
     targets = []
     for prod, settings in PRODUCTS.items():
         start, end = settings["start_date"], settings["end_date"]
         targets.append(f"{RESULTS_DIR}/{prod}/{prod}_{start}_to_{end}.parquet")
-        targets.append(f"{RESULTS_DIR}/{prod}/.cleanup_done")
     return targets
 
 
@@ -118,10 +117,8 @@ onerror:
 
 rule preprocess_aoi:
     """
-    Pre-process the AOI once per run: normalise CRS, assign region_id,
-    apply geometry simplification, write to GeoParquet.
-    All chunk workers depend on this output instead of the raw shapefile,
-    so the coordinate-counting / simplification ladder runs exactly once.
+    Pre-process the AOI to the largest scale it can get away with based on the products selected for that run
+    A second 
     """
     input:
         shp = SHP
@@ -145,7 +142,7 @@ rule extract_geojson_chunk:
         aoi  = PREPPED_AOI,
         prev = get_previous_chunk_output
     output:
-        geojson = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.geojson"
+        geojson = temp(f"{GEOJSON_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.geojson")
     resources:
         gee=lambda wildcards: PRODUCTS[wildcards.prod].get("gee_weight", 1)
     retries: 2  # matches GEE_TIMEOUT_MAX_RETRIES-1; on 3rd timeout the worker shelves the chunk
@@ -181,7 +178,7 @@ rule convert_to_parquet:
     input:
         geojson = f"{GEOJSON_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.geojson"
     output:
-        parquet = f"{PARQUET_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.parquet"
+        parquet = temp(f"{PARQUET_CHUNKS_DIR}/{{prod}}/{{band}}_{{time_chunk}}.parquet")
     threads: 1
     wildcard_constraints:
         band       = r"[A-Za-z][A-Za-z0-9_]*",
@@ -191,44 +188,47 @@ rule convert_to_parquet:
     script:
         "scripts/geojson_to_parquet.py"
 
-rule merge_product_parquet:
+rule merge_band_chunks:
     """
-    Step 3: Merge all GeoParquet chunks for a product into final output.
-    Combines all bands and time chunks with geometry preserved.
+    Step 3a: Merge all time chunks for a single band into one parquet.
+    Pure row-append (LONG merge) — identical schema per band, so DuckDB streams
+    without pivoting. Memory cost scales with one band's data, not all bands.
     """
     input:
         chunks = lambda wildcards: [
-            f"{PARQUET_CHUNKS_DIR}/{wildcards.prod}/{band}_{chunk}.parquet"
-            for band in PRODUCTS[wildcards.prod]["bands"]
+            f"{PARQUET_CHUNKS_DIR}/{wildcards.prod}/{wildcards.band}_{chunk}.parquet"
             for chunk in infer_time_chunks(PRODUCTS[wildcards.prod])
+        ]
+    output:
+        band_parquet = temp(f"{PARQUET_CHUNKS_DIR}/{{prod}}/merged_{{band}}.parquet")
+    params:
+        merge_strategy = "long"
+    threads: 1
+    wildcard_constraints:
+        band = r"[A-Za-z][A-Za-z0-9_]*"
+    log:
+        f"{LOGS_DIR}/{{prod}}/merge_band_{{band}}.log"
+    script:
+        "scripts/merge_parquet.py"
+
+
+rule merge_product_parquet:
+    """
+    Step 3b: Merge per-band parquets into a single wide product file.
+    Receives one already-complete parquet per band (not N_bands × N_chunks),
+    so the wide pivot operates on at most N_band files instead of N_bands × N_chunks.
+    """
+    input:
+        chunks = lambda wildcards: [
+            f"{PARQUET_CHUNKS_DIR}/{wildcards.prod}/merged_{band}.parquet"
+            for band in PRODUCTS[wildcards.prod]["bands"]
         ]
     output:
         merged = f"{RESULTS_DIR}/{{prod}}/{{prod}}_{{start}}_to_{{end}}.parquet"
     params:
-        merge_strategy = "long"
+        merge_strategy = "wide"
     threads: 2
     log:
         f"{LOGS_DIR}/{{prod}}/merge_{{start}}_to_{{end}}.log"
     script:
         "scripts/merge_parquet.py"
-
-rule cleanup_intermediate:
-    """
-    Remove all intermediate GeoJSON and parquet chunk files for a product once
-    the final merged GeoParquet has been written successfully.
-    Runs automatically after merge_product_parquet completes.
-    """
-    input:
-        merged = lambda wc: (
-            f"{RESULTS_DIR}/{wc.prod}/"
-            f"{wc.prod}_{PRODUCTS[wc.prod]['start_date']}_to_{PRODUCTS[wc.prod]['end_date']}.parquet"
-        )
-    output:
-        marker = f"{RESULTS_DIR}/{{prod}}/.cleanup_done"
-    run:
-        import shutil, pathlib
-        for d in [GEOJSON_CHUNKS_DIR + "/" + wildcards.prod,
-                  PARQUET_CHUNKS_DIR + "/" + wildcards.prod]:
-            if pathlib.Path(d).exists():
-                shutil.rmtree(d)
-        pathlib.Path(output.marker).touch()
