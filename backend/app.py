@@ -51,10 +51,11 @@ GEE_KEY_PATH  = Path(
         str(Path(__file__).parent.parent / "config" / "gee-key.json"),
     )
 ).resolve()
-APP_DIR       = Path(__file__).parent.parent        # repo root
-SNAKEFILE     = APP_DIR / "Snakefile"
-LOG_HANDLER   = APP_DIR / "scripts" / "snakemake_log_handler.py"
-RUN_DB_PATH   = RUNS_DIR / "run_state.duckdb"
+APP_DIR          = Path(__file__).parent.parent        # repo root
+SNAKEFILE        = APP_DIR / "Snakefile"
+LOG_HANDLER      = APP_DIR / "scripts" / "snakemake_log_handler.py"
+RUN_DB_PATH      = RUNS_DIR / "run_state.duckdb"
+SNAKEMAKE_PIDFILE = APP_DIR / ".snakemake.pid"  # written on every launch for stop-app cleanup
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -544,6 +545,10 @@ def _launch_snakemake(run_id: str, payload: dict, log_path: Path) -> subprocess.
         target=_filter_snakemake_output, args=(proc, log_path), daemon=True
     ).start()
     _set_execution_meta(run_id, proc.pid, str(log_path), str(cfg_path))
+    try:
+        SNAKEMAKE_PIDFILE.write_text(str(proc.pid))
+    except Exception:
+        pass
     return proc
 
 
@@ -993,7 +998,17 @@ def pause_run(run_id: str):
 
     pid = meta.get("snakemake_pid")
     if pid and _is_pid_alive(int(pid)):
-        if sys.platform != "win32":
+        if sys.platform == "win32":
+            # Windows has no SIGSTOP — kill the process instead.
+            # Snakemake checkpoints completed jobs in .snakemake/, so resume
+            # can restart it and it will skip already-finished work.
+            _signal_process_tree(int(pid), signal.SIGTERM)
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and _is_pid_alive(int(pid)):
+                time.sleep(0.1)
+            if _is_pid_alive(int(pid)):
+                _signal_process_tree(int(pid), _SIGKILL)
+        else:
             _signal_process_tree(int(pid), signal.SIGSTOP)
 
     payload = meta.get("payload", {})
@@ -1015,6 +1030,10 @@ def resume_run(run_id: str, body: ResumeRunRequest = ResumeRunRequest()):
     stored_concurrency = int(payload.get("gee_concurrency", DEFAULT_GEE_CONCURRENCY))
     new_concurrency    = max(1, body.gee_concurrency) if body.gee_concurrency is not None else None
     changing           = new_concurrency is not None and new_concurrency != stored_concurrency
+
+    # On Windows, pause kills the process — resume must always restart it.
+    if sys.platform == "win32":
+        changing = True
 
     if changing:
         # Kill the frozen process tree and restart with the new concurrency.

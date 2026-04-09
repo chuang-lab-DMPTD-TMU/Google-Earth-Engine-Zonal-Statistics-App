@@ -5,6 +5,7 @@ Uses DuckDB for efficient joining with spatial data preservation.
 import duckdb
 import os
 import sys
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
@@ -18,48 +19,43 @@ def log_progress(message, log_file=None, quiet=False):
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {message}\n")
 
-def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_file=None, quiet=False):
-    # ... (setup unchanged) ...
-
+def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", band=None, log_file=None, quiet=False):
     def _log(message):
         log_progress(message, log_file, quiet)
 
+    # Columns that identify a row but are not band-specific statistics.
+    # These are kept as-is when renaming stat columns with a band prefix.
+    NON_STAT_COLS = {'region_id', 'Date', 'OGC_FID', 'id', 'admin', 'name'}
+
     conn = duckdb.connect(":memory:")
     try:
+        conn.execute("SET memory_limit='1.5GB'")
+        conn.execute(f"SET temp_directory='{tempfile.gettempdir()}'")
         conn.execute("INSTALL spatial;")
         conn.execute("LOAD spatial;")
 
         total = len(chunk_files)
-        _log(f"Loading {total} chunk(s)...")
-
-        # Get schema from first file without loading data into memory
-        first_cols = [
-            row[0] for row in
-            conn.execute(f"DESCRIBE SELECT * FROM read_parquet('{chunk_files[0]}')").fetchall()
-        ]
+        _log(f"Merging {total} chunk(s) ({merge_strategy} strategy)...")
 
         file_list_sql = "[" + ", ".join(f"'{f}'" for f in chunk_files) + "]"
+        src = f"read_parquet({file_list_sql}, union_by_name=true)"
+
+        # Schema from file metadata only — no data loaded
+        all_col_info = conn.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()
+        all_col_names = [row[0] for row in all_col_info]
+
+        sort_cols = [k for k in ['Date', 'region_id'] if k in all_col_names]
 
         if merge_strategy == "wide":
             _log("Performing WIDE merge (bands as columns)")
-            _log(f"Loaded {total}/{total} chunks (100%)")
-
-            # Step 1: UNION ALL chunks with union_by_name so every band column appears,
-            # NULL-padded in rows that belong to a different band.
-            conn.execute(
-                f"CREATE TABLE long_all AS "
-                f"SELECT * FROM read_parquet({file_list_sql}, union_by_name=true)"
-            )
-
-            join_keys = [k for k in ['region_id', 'Date'] if k in first_cols]
+            join_keys = [k for k in ['region_id', 'Date'] if k in all_col_names]
             if not join_keys:
                 _log("WARNING: No join keys found, falling back to LONG merge.")
-                merged_query = "SELECT * FROM long_all"
+                query = f"SELECT * FROM {src}"
             else:
-                # Step 2: Pivot — GROUP BY join keys and collapse each band's NULL-padded
-                # rows into a single wide row.  MAX() picks the one non-NULL value for
-                # numeric/text band columns; ANY_VALUE() is used for geometry.
-                all_col_info = conn.execute("DESCRIBE long_all").fetchall()
+                # Pivot: GROUP BY join keys, MAX() for value cols, ANY_VALUE() for geometry.
+                # Per-band stat columns already carry the band prefix (e.g. LC_Type1_histogram)
+                # from the preceding long-merge step, so MAX() correctly coalesces NULLs.
                 select_parts = []
                 for col_name, col_type, *_ in all_col_info:
                     q = f'"{col_name}"'
@@ -70,54 +66,41 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", log_fi
                     else:
                         select_parts.append(f'MAX({q}) AS {q}')
                 group_clause = ', '.join(f'"{k}"' for k in join_keys)
-                merged_query = (
-                    f"SELECT {', '.join(select_parts)} FROM long_all "
-                    f"GROUP BY {group_clause}"
-                )
-
+                query = f"SELECT {', '.join(select_parts)} FROM {src} GROUP BY {group_clause}"
         else:
             _log("Performing LONG merge (stacking rows)")
-            # Use read_parquet with file list — DuckDB streams files without loading all into memory.
-            _log(f"Loaded {total}/{total} chunks (100%)")
-            merged_query = f"SELECT * FROM read_parquet({file_list_sql}, union_by_name=true)"
-
-        # Execute merge
-        _log("Executing merge query...")
-        conn.execute(f"CREATE TABLE merged AS {merged_query}")
-
-        # Get result stats
-        row_count = conn.execute("SELECT COUNT(*) FROM merged").fetchone()[0]
-        _log(f"Merged table has {row_count} rows")
-
-        # Sort by Date and region_id if available
-        sort_cols = []
-        merged_cols = [col[1] for col in conn.execute("PRAGMA table_info(merged)").fetchall()]
-        if 'Date' in merged_cols:
-            sort_cols.append('Date')
-        if 'region_id' in merged_cols:
-            sort_cols.append('region_id')
+            if band:
+                # Prefix stat columns with the band name so that the subsequent wide
+                # merge can distinguish LC_Type1_histogram from LC_Type2_histogram, etc.
+                _log(f"Renaming stat columns with band prefix '{band}'")
+                select_parts = []
+                for col_name, col_type, *_ in all_col_info:
+                    q = f'"{col_name}"'
+                    if col_name in NON_STAT_COLS or 'GEOMETRY' in col_type.upper():
+                        select_parts.append(q)
+                    else:
+                        select_parts.append(f'{q} AS "{band}_{col_name}"')
+                query = f"SELECT {', '.join(select_parts)} FROM {src}"
+            else:
+                query = f"SELECT * FROM {src}"
 
         if sort_cols:
             sort_clause = ", ".join(sort_cols)
             _log(f"Sorting by: {sort_clause}")
-            conn.execute(f"CREATE TABLE sorted AS SELECT * FROM merged ORDER BY {sort_clause}")
-            table_to_export = "sorted"
-        else:
-            table_to_export = "merged"
+            query += f" ORDER BY {sort_clause}"
 
-        # Write to Parquet
         _log(f"Writing final GeoParquet: {output_path}")
         conn.execute(f"""
-            COPY {table_to_export}
+            COPY ({query})
             TO '{output_path}'
             (FORMAT PARQUET, COMPRESSION 'ZSTD', ROW_GROUP_SIZE 100000)
         """)
 
-        # Verify and report
         if not os.path.exists(output_path):
             raise RuntimeError(f"Merged parquet file not created: {output_path}")
 
-        file_size_mb = os.path.getsize(output_path) / (1024*1024)
+        file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
+        row_count = conn.execute(f"SELECT COUNT(*) FROM read_parquet('{output_path}')").fetchone()[0]
         _log(f"✓ Merge successful: {output_path} ({file_size_mb:.2f} MB, {row_count} rows)")
 
         return True
@@ -133,9 +116,10 @@ if __name__ == "__main__":
     try:
         # Snakemake mode
         chunk_files = snakemake.input.chunks
-        output_path = snakemake.output.merged
+        output_path = snakemake.output[0]
         log_file = snakemake.log[0] if snakemake.log else None
         merge_strategy = snakemake.params.get("merge_strategy", "wide")
+        band = snakemake.params.get("band", None)
         quiet = True
     except NameError:
         # CLI mode
@@ -146,10 +130,11 @@ if __name__ == "__main__":
         chunk_files = sys.argv[2:]
         log_file = None
         merge_strategy = "wide"
+        band = None
         quiet = False
 
     try:
-        merge_parquet_chunks(chunk_files, output_path, merge_strategy, log_file, quiet)
+        merge_parquet_chunks(chunk_files, output_path, merge_strategy, band, log_file, quiet)
         sys.exit(0)
     except Exception as e:
         print(f"FATAL ERROR: {str(e)}", file=sys.stderr)

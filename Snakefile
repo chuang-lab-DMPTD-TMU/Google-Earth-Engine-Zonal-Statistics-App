@@ -202,7 +202,8 @@ rule merge_band_chunks:
     output:
         band_parquet = temp(f"{PARQUET_CHUNKS_DIR}/{{prod}}/merged_{{band}}.parquet")
     params:
-        merge_strategy = "long"
+        merge_strategy = "long",
+        band = lambda wildcards: wildcards.band
     threads: 1
     wildcard_constraints:
         band = r"[A-Za-z][A-Za-z0-9_]*"

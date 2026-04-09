@@ -17,21 +17,31 @@ function Stop-App {
         $PORT = Get-Content ".pixi.port"
     }
 
+    # Kill the uvicorn/pixi parent process
     if (Test-Path ".pixi.pid") {
         $savedPid = Get-Content ".pixi.pid" -ErrorAction SilentlyContinue
         if ($savedPid) {
-            $p = Get-Process -Id $savedPid -ErrorAction SilentlyContinue
-            if ($p) {
-                Write-Host "  Stopping PID $savedPid..."
-                try { $p.Kill($true) } catch {}
-            }
+            Write-Host "  Stopping backend (PID $savedPid)..."
+            taskkill /pid $savedPid /f /t 2>$null | Out-Null
         }
     }
 
+    # Kill the Snakemake process tree directly — survives uvicorn crashes because
+    # the backend writes this file the moment Snakemake is launched.
+    if (Test-Path ".snakemake.pid") {
+        $smPid = Get-Content ".snakemake.pid" -ErrorAction SilentlyContinue
+        if ($smPid) {
+            Write-Host "  Stopping Snakemake workers (PID $smPid)..."
+            taskkill /pid $smPid /f /t 2>$null | Out-Null
+        }
+        Remove-Item -Force ".snakemake.pid" -ErrorAction SilentlyContinue
+    }
+
+    # Kill any process still listening on the app port
     $listeners = netstat -aon 2>$null | Select-String ":${PORT}\s+.*LISTENING"
     foreach ($line in $listeners) {
         $linePid = ($line -split '\s+')[-1]
-        Write-Host "  Killing PID $linePid on port $PORT..."
+        Write-Host "  Killing port listener (PID $linePid)..."
         taskkill /pid $linePid /f /t 2>$null | Out-Null
     }
 
@@ -114,9 +124,12 @@ function Start-App {
     }
 
     # --- Find a free port ---
+    # Use netstat instead of Get-NetTCPConnection — the latter can hang indefinitely
+    # when the Windows network stack is in a degraded state (e.g. after a system crash).
     $PORT = $null
+    $netstatOutput = netstat -ano 2>$null
     foreach ($p in 8000, 8001, 8002, 8003) {
-        $inUse = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
+        $inUse = $netstatOutput | Select-String ":${p}\s"
         if (-not $inUse) { $PORT = $p; break }
     }
     if (-not $PORT) {
@@ -197,6 +210,9 @@ function Start-App {
         $proc.BeginOutputReadLine()
         $proc.BeginErrorReadLine()
 
+        # Write PID immediately so Stop-App can kill it even if startup crashes
+        Set-Content -Path ".pixi.pid" -Value $proc.Id
+
         # --- Poll for uvicorn ready line (up to 60 s) ---
         Write-Host "  Waiting for backend..."
         Write-Host ""
@@ -260,9 +276,8 @@ function Start-App {
             throw "Uvicorn started but app did not respond on port $PORT. Check pixi.log for details."
         }
 
-        # --- Write state files only after confirmed ready ---
+        # --- Record port once confirmed ready (.pixi.pid already written above) ---
         Set-Content -Path ".pixi.port" -Value $PORT
-        Set-Content -Path ".pixi.pid"  -Value $proc.Id
 
         Write-Host ""
         Write-Host "  =========================================="

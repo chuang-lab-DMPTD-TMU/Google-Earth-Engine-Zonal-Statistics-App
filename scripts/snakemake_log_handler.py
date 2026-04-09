@@ -244,8 +244,10 @@ def _dispatch(log: dict):
                 _append_run_event(f"Started {prod} merge", event_type="job_start")
             log_files = log.get("log") or []
             log_path  = log_files[0] if log_files else None
-            if jobid is not None and log_path:
-                _start_tail(int(jobid), log_path, f"merge/{prod}", _merge_line_filter)
+            if jobid is not None:
+                _job_map[int(jobid)] = {"type": "merge", "prod": prod}
+                if log_path:
+                    _start_tail(int(jobid), log_path, f"merge/{prod}", _merge_line_filter)
             return
 
         if rule == "preprocess_aoi":
@@ -297,6 +299,7 @@ def _dispatch(log: dict):
         if rule == "merge_product_parquet":
             if jobid is not None:
                 _stop_tail(int(jobid))
+                _job_map.pop(int(jobid), None)
             if prod:
                 _append_run_event(f"Failed {prod} merge: {error_str}", event_type="job_error")
             return
@@ -325,8 +328,11 @@ def _dispatch(log: dict):
         if jobid is not None:
             jobid = int(jobid)
             _stop_tail(jobid)
-            wc_cached = _job_map.get(jobid, {})
-            if wc_cached:
+            wc_cached = _job_map.pop(jobid, {})
+            if wc_cached.get("type") == "merge":
+                prod = wc_cached.get("prod")
+                if prod:
+                    _append_run_event(f"Finished {prod} merge", event_type="job_finished")
+            elif wc_cached:
                 _upsert_job(wc_cached["prod"], wc_cached["band"], wc_cached["chunk"],
                             "done", jobid=jobid)
-                _job_map.pop(jobid, None)  # free memory

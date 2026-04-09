@@ -111,7 +111,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
             "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
         },
         "label": "ESA WorldCover 2020 (v1.0)",
-        "description": "Aggregated to 500m - ESA WorldCover landcover classification v100 (10m, 2020).",
+        "description": "ESA WorldCover landcover classification v100 (10m, 2020), adjust in 'products.py' if too complex.",
         "resolution_m": 10,
     },
     "WorldCover_v200": {
@@ -125,7 +125,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
             "Map": {"stats": ["histogram"], "default_stats": ["histogram"]},
         },
         "label": "ESA WorldCover 2021 (v2.0)",
-        "description": "Aggregated to 500m - ESA WorldCover landcover classification v200 (10m, 2021).",
+        "description": "ESA WorldCover landcover classification v200 (10m, 2021), adjust in 'products.py' if too complex",
         "resolution_m": 10,
     },
     "MODIS_LULC": {
@@ -143,8 +143,22 @@ PRODUCT_REGISTRY: dict[str, dict] = {
             "LC_Type5": {"stats": ["histogram"], "default_stats": ["histogram"]},
         },
         "label": "MODIS Land Use / Land Cover",
-        "description": "MODIS Land Cover Type (500m resolution, annual, multiple schemes).",
+        "description": "MODIS Land Cover Type (500m resolution, annual, multiple schemes), adjust in 'products.py' if too complex",
         "resolution_m": 500,
+    },
+    "WorldPop": {
+        "ee_collection": "WorldPop/GP/100m/pop",
+        "min_date": "2000-01-01",
+        "max_date": "2020-12-31",
+        "scale": 100,
+        "cadence": "annual",
+        "categorical": False,
+        "content": {
+            "population": {"stats": ["sum"], "default_stats": ["sum"]},
+        },
+        "label": "WorldPop Population (100m)",
+        "description": "Global unconstrained population count (100m resolution, annual 2000–2020).",
+        "resolution_m": 100,
     },
     "NDBI": {
         # No single ee_collection — worker uses multi_collections to build a merged NDBI series.
@@ -222,7 +236,7 @@ PRODUCT_REGISTRY: dict[str, dict] = {
         },
         "label": "NDBI (Landsat 5 / 7 / 8)",
         "description": (
-            "Aggregated to 250m - Normalized Difference Built-up Index (30m, per-scene). "
+            "Normalized Difference Built-up Index (30m, per-scene), adjust in 'products.py' if too complex"
             "Landsat 5 TM 1984–Nov 2011, Landsat 7 ETM+ (SLC-off) Dec 2011–Apr 2013, "
             "Landsat 8 OLI Apr 2013–2025. Formula: (SWIR − NIR) / (SWIR + NIR)."
         ),
