@@ -31,6 +31,7 @@ PRODUCTS = config.get("products", {})
 SHP = config.get("shp_path", "")
 RUN_ID = config.get("run_id", "default")
 APP_DIR = config.get("app_dir", "/app")
+ID_COLUMN = config.get("id_column", "")
 _gee_slots    = int(config.get("gee_concurrency", 10))
 _num_products = max(1, len(PRODUCTS))
 # Max gee_weight across selected products — determines true concurrent chunk limit.
@@ -125,7 +126,8 @@ rule preprocess_aoi:
     output:
         aoi = PREPPED_AOI
     params:
-        finest_resolution_m = _finest_resolution_m
+        finest_resolution_m = _finest_resolution_m,
+        id_column           = ID_COLUMN
     log:
         f"{LOGS_DIR}/preprocess_aoi.log"
     script:

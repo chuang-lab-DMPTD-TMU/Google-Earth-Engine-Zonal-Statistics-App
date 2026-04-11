@@ -33,7 +33,7 @@ interface Props {
 
 export default function ResultsPanel({ runId }: Props) {
   const queryClient = useQueryClient()
-  const { pendingRun, setIsRunning, setActiveRunId } = useAppStore()
+  const { pendingRun, setIsRunning, setActiveRunId, idColumn } = useAppStore()
   const [retrying, setRetrying] = useState(false)
   const [partialDownloading, setPartialDownloading] = useState<string | null>(null)
   const [partialError, setPartialError] = useState<string | null>(null)
@@ -74,7 +74,7 @@ export default function ResultsPanel({ runId }: Props) {
 
   const submitMutation = useMutation({
     mutationFn: () =>
-      submitRun({ run_id: pendingRun.run_id, products: pendingRun.products, gee_concurrency: geeConcurrency }),
+      submitRun({ run_id: pendingRun.run_id, products: pendingRun.products, gee_concurrency: geeConcurrency, id_column: idColumn }),
     onSuccess: (detail) => {
       setIsRunning(true)
       setActiveRunId(detail.run_id)

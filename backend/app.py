@@ -91,6 +91,7 @@ class SubmitRunRequest(BaseModel):
     run_id: str
     products: list[ProductConfig]
     gee_concurrency: int = DEFAULT_GEE_CONCURRENCY
+    id_column: str | None = None
 
 class RetryRunRequest(BaseModel):
     gee_concurrency: int | None = None  # None → keep stored value
@@ -950,6 +951,7 @@ def submit_run(body: SubmitRunRequest):
         "aoi_name":              aoi_file.name,
         "app_dir":               APP_DIR.as_posix(),
         "gee_concurrency":       max(1, body.gee_concurrency),
+        "id_column":             body.id_column or "",
     }
 
     # Register run (status=queued → running)
@@ -1203,11 +1205,24 @@ def _process_aoi(content: bytes, ext: str, dest: Path, input_dir: Path):
     preview_gdf["geometry"] = preview_gdf.geometry.simplify(0.001, preserve_topology=True)
     preview  = json.loads(preview_gdf.to_json())
 
+    # Introspect non-geometry columns so the frontend can offer an ID column picker.
+    geom_col  = gdf.geometry.name
+    data_cols = [c for c in gdf.columns if c != geom_col]
+    column_samples: dict = {}
+    column_has_duplicates: dict = {}
+    for col in data_cols:
+        non_null = gdf[col].dropna()
+        column_samples[col]       = [str(v) for v in non_null.head(3).tolist()]
+        column_has_duplicates[col] = bool(gdf[col].duplicated().any())
+
     return {
-        "feature_count":   len(gdf),
-        "crs":             str(gdf.crs),
-        "bounds":          bounds,
-        "geojson_preview": preview,
+        "feature_count":          len(gdf),
+        "crs":                    str(gdf.crs),
+        "bounds":                 bounds,
+        "geojson_preview":        preview,
+        "columns":                data_cols,
+        "column_samples":         column_samples,
+        "column_has_duplicates":  column_has_duplicates,
     }
 
 

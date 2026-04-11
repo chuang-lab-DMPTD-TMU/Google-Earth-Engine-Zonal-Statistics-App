@@ -44,6 +44,7 @@ _SIMPLIFY_LADDER = [0.001, 0.003, 0.01, 0.02, 0.05]
 shp_path            = snakemake.input.shp
 out_path            = snakemake.output.aoi
 finest_resolution_m = snakemake.params.finest_resolution_m
+id_column           = (getattr(snakemake.params, "id_column", None) or "").strip() or None
 
 log_progress(f"Loading AOI from {shp_path}")
 input_path = Path(shp_path)
@@ -61,8 +62,18 @@ else:
 
 # Assign and deduplicate region_id
 if 'region_id' not in gdf.columns:
-    id_candidates = ['ADMIN', 'NAME', 'ISO_A3', 'NAME_LONG', 'id', 'fid']
-    region_col = next((c for c in id_candidates if c in gdf.columns), None)
+    if id_column and id_column in gdf.columns:
+        region_col = id_column
+        log_progress(f"Using user-specified ID column: {region_col!r}")
+    else:
+        if id_column:
+            log_progress(f"WARNING: Specified ID column {id_column!r} not found in file; falling back to auto-detection")
+        id_candidates = ['ADMIN', 'NAME', 'ISO_A3', 'NAME_LONG', 'id', 'fid']
+        region_col = next((c for c in id_candidates if c in gdf.columns), None)
+        if region_col:
+            log_progress(f"Auto-detected ID column: {region_col!r}")
+        else:
+            log_progress("No ID column found; using row index as region_id")
     gdf['region_id'] = gdf[region_col].astype(str) if region_col else gdf.index.astype(str)
 
 if gdf['region_id'].duplicated().any():

@@ -10,6 +10,7 @@ Usage:
 import sys
 import re
 import json
+import tempfile
 import duckdb
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,53 +37,53 @@ def sql_quote_ident(identifier: str) -> str:
 
 
 def merge_parquet_chunks_to_output(chunk_files, output_file: Path):
-    """Merge chunk parquet files into one parquet file using UNION ALL with NULL-padding."""
+    """Merge chunk parquet files into one parquet file.
+
+    Uses lazy read_parquet() references so no chunk data is loaded into memory
+    upfront.  DuckDB streams the union_by_name scan through the GROUP BY pivot
+    and writes directly to the output file in a single pass.
+    """
     if not chunk_files:
         return False
 
     conn = duckdb.connect(":memory:")
     try:
         try:
+            conn.execute("SET memory_limit='75%'")
+        except Exception:
+            try:
+                import psutil
+                _mem_gb = max(1, int(psutil.virtual_memory().total * 0.75 / 1024 ** 3))
+            except Exception:
+                _mem_gb = 4
+            conn.execute(f"SET memory_limit='{_mem_gb}GB'")
+        conn.execute(f"SET temp_directory='{tempfile.gettempdir()}'")
+        try:
             conn.execute("LOAD spatial;")
         except Exception:
-            pass
+            try:
+                conn.execute("INSTALL spatial;")
+                conn.execute("LOAD spatial;")
+            except Exception:
+                pass
 
-        # Load all chunks and collect their column sets.
-        chunk_cols_list = []
-        for idx, chunk_path in enumerate(chunk_files):
-            conn.execute(f"CREATE TABLE chunk_{idx} AS SELECT * FROM read_parquet(?)", [str(chunk_path)])
-            cols = [row[1] for row in conn.execute(f"PRAGMA table_info('chunk_{idx}')").fetchall()]
-            chunk_cols_list.append(cols)
+        # Lazy reference — DuckDB streams on demand; nothing is loaded yet.
+        # union_by_name=true handles schema differences between chunks (NULL-fills
+        # missing columns) without requiring manual NULL-padding.
+        file_list_sql = "[" + ", ".join(f"'{f}'" for f in chunk_files) + "]"
+        src = f"read_parquet({file_list_sql}, union_by_name=true)"
 
-        # Build the ordered union of all column names (preserve first-seen order).
-        seen: set = set()
-        all_col_names: list = []
-        for cols in chunk_cols_list:
-            for c in cols:
-                if c not in seen:
-                    all_col_names.append(c)
-                    seen.add(c)
+        # Schema from file metadata only — no row data loaded.
+        all_col_info = conn.execute(f"DESCRIBE SELECT * FROM {src}").fetchall()
+        all_col_names = [row[0] for row in all_col_info]
+        col_types = {row[0]: row[1].upper() for row in all_col_info}
 
-        # UNION ALL with NULL-fill so no band's data is lost even when schemas differ.
-        union_parts = []
-        for idx, cols in enumerate(chunk_cols_list):
-            col_set = set(cols)
-            exprs = [
-                sql_quote_ident(c) if c in col_set else f"NULL AS {sql_quote_ident(c)}"
-                for c in all_col_names
-            ]
-            union_parts.append(f"SELECT {', '.join(exprs)} FROM chunk_{idx}")
-
-        conn.execute(f"CREATE TABLE long_all AS {' UNION ALL '.join(union_parts)}")
-
-        # Pivot: GROUP BY (region_id, Date) so each band's NULL-padded rows are
-        # collapsed into a single wide row with all band columns populated.
         join_keys = [k for k in ("region_id", "Date") if k in all_col_names]
+        sort_cols = [k for k in ("Date", "region_id") if k in all_col_names]
+
         if join_keys:
-            col_types = {
-                row[1]: row[2].upper()
-                for row in conn.execute("PRAGMA table_info('long_all')").fetchall()
-            }
+            # GROUP BY (region_id, Date): MAX() coalesces NULLs from the union into
+            # a single wide row per region/date; ANY_VALUE() picks the first geometry.
             select_parts = []
             for c in all_col_names:
                 q = sql_quote_ident(c)
@@ -93,30 +94,18 @@ def merge_parquet_chunks_to_output(chunk_files, output_file: Path):
                 else:
                     select_parts.append(f"MAX({q}) AS {q}")
             group_clause = ", ".join(sql_quote_ident(k) for k in join_keys)
-            conn.execute(
-                f"CREATE TABLE merged AS "
-                f"SELECT {', '.join(select_parts)} FROM long_all GROUP BY {group_clause}"
-            )
+            query = f"SELECT {', '.join(select_parts)} FROM {src} GROUP BY {group_clause}"
         else:
-            conn.execute("CREATE TABLE merged AS SELECT * FROM long_all")
-
-        sort_cols = []
-        merged_cols = [row[1] for row in conn.execute("PRAGMA table_info('merged')").fetchall()]
-        if "Date" in merged_cols:
-            sort_cols.append(sql_quote_ident("Date"))
-        if "region_id" in merged_cols:
-            sort_cols.append(sql_quote_ident("region_id"))
+            query = f"SELECT * FROM {src}"
 
         if sort_cols:
-            conn.execute(f"CREATE TABLE sorted AS SELECT * FROM merged ORDER BY {', '.join(sort_cols)}")
-            table_to_export = "sorted"
-        else:
-            table_to_export = "merged"
+            sort_clause = ", ".join(sql_quote_ident(c) for c in sort_cols)
+            query += f" ORDER BY {sort_clause}"
 
         output_file.parent.mkdir(parents=True, exist_ok=True)
         conn.execute(
-            f"COPY {table_to_export} TO ? (FORMAT PARQUET, COMPRESSION ZSTD)",
-            [str(output_file)]
+            f"COPY ({query}) TO ? (FORMAT PARQUET, COMPRESSION ZSTD, ROW_GROUP_SIZE 100000)",
+            [str(output_file)],
         )
         return output_file.exists()
     finally:

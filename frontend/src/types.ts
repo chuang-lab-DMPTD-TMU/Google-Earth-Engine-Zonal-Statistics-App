@@ -71,6 +71,9 @@ export interface AOIInfo {
   crs: string
   bounds: [number, number, number, number]  // [minx, miny, maxx, maxy]
   geojson_preview: GeoJSON.FeatureCollection
+  columns: string[]
+  column_samples: Record<string, string[]>
+  column_has_duplicates: Record<string, boolean>
 }
 
 // ─── GEE credentials ─────────────────────────────────────────────────────────
@@ -95,4 +98,5 @@ export interface SubmitRunRequest {
   run_id: string
   products: ProductConfig[]
   gee_concurrency?: number
+  id_column?: string | null
 }

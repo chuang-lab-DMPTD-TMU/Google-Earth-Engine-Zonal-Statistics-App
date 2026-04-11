@@ -19,7 +19,7 @@ def log_progress(message, log_file=None, quiet=False):
         with open(log_file, "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] {message}\n")
 
-def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", band=None, log_file=None, quiet=False):
+def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", band=None, log_file=None, quiet=False, threads=None):
     def _log(message):
         log_progress(message, log_file, quiet)
 
@@ -29,10 +29,24 @@ def merge_parquet_chunks(chunk_files, output_path, merge_strategy="wide", band=N
 
     conn = duckdb.connect(":memory:")
     try:
-        conn.execute("SET memory_limit='1.5GB'")
+        try:
+            conn.execute("SET memory_limit='75%'")
+        except Exception:
+            # Percentage notation requires DuckDB ≥ 0.10; compute 75% of total RAM directly.
+            try:
+                import psutil
+                _mem_gb = max(1, int(psutil.virtual_memory().total * 0.75 / 1024 ** 3))
+            except Exception:
+                _mem_gb = 4
+            conn.execute(f"SET memory_limit='{_mem_gb}GB'")
         conn.execute(f"SET temp_directory='{tempfile.gettempdir()}'")
-        conn.execute("INSTALL spatial;")
-        conn.execute("LOAD spatial;")
+        if threads is not None:
+            conn.execute(f"SET threads={int(threads)}")
+        try:
+            conn.execute("LOAD spatial;")
+        except Exception:
+            conn.execute("INSTALL spatial;")
+            conn.execute("LOAD spatial;")
 
         total = len(chunk_files)
         _log(f"Merging {total} chunk(s) ({merge_strategy} strategy)...")
@@ -121,6 +135,7 @@ if __name__ == "__main__":
         merge_strategy = snakemake.params.get("merge_strategy", "wide")
         band = snakemake.params.get("band", None)
         quiet = True
+        threads = getattr(snakemake, "threads", None)
     except NameError:
         # CLI mode
         if len(sys.argv) < 3:
@@ -132,9 +147,10 @@ if __name__ == "__main__":
         merge_strategy = "wide"
         band = None
         quiet = False
+        threads = None
 
     try:
-        merge_parquet_chunks(chunk_files, output_path, merge_strategy, band, log_file, quiet)
+        merge_parquet_chunks(chunk_files, output_path, merge_strategy, band, log_file, quiet, threads)
         sys.exit(0)
     except Exception as e:
         print(f"FATAL ERROR: {str(e)}", file=sys.stderr)

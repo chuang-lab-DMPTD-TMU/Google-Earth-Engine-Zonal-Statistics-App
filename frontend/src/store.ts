@@ -18,6 +18,10 @@ interface AppState {
   removeProduct: (productId: string) => void
   resetPending: () => void
 
+  // ID column selected by the user from the AOI upload response
+  idColumn: string | null
+  setIdColumn: (col: string | null) => void
+
   isRunning: boolean
   setIsRunning: (v: boolean) => void
 }
@@ -48,6 +52,9 @@ export const useAppStore = create<AppState>((set) => ({
     })),
 
   resetPending: () => set({ pendingRun: defaultPending() }),
+
+  idColumn: null,
+  setIdColumn: (col) => set({ idColumn: col }),
 
   isRunning: false,
   setIsRunning: (v) => set({ isRunning: v }),
